@@ -816,7 +816,18 @@ function triggerSync(userId, bookId) {
 // endpoint (POST /books/files/:fileId/progress) — unlike uploadSessions(), this
 // doesn't wait for a closed reading_sessions row, so it can fire on every chapter
 // change / manual KOSync push, not just when the reader is closed.
-async function pushProgress(userId, bookId, percentage) {
+// `xpointer`, when given, is Codexa's own KOReader-style position string (same format/value
+// as koReaderXPointer() already sends over the KOSync protocol — see reader.js). Confirmed live
+// (2026-09-09) this matters: BookOrbit's saveFileProgress overwrites cfi/koreaderProgress with
+// null on ANY push that omits them (its DTO has no partial-update semantics), so a percentage-
+// only push here was silently blanking the xpointer that BookOrbit's own koreader module keeps
+// in sync for every OTHER KOReader-protocol client (Xteink X4 included) — those clients resolve
+// chapter/page from the xpointer, not the percentage, so once it went null they kept showing
+// whatever chapter they were last rendering, one full chapter behind, right next to a percentage
+// number that actually was fresh and correct. Not sending `cfi` here is deliberate, unlike
+// xpointer: Codexa's own CFI format (chapter-level only, epubcfi(/6/N!/4/2/1:0)) isn't something
+// BookOrbit's own web reader (or anything else reading that field) is equipped to resolve.
+async function pushProgress(userId, bookId, percentage, xpointer) {
   // Every exit point logs *why*, unlike before — this was entirely silent (no log on success,
   // and triggerProgressPush's .catch(() => {}) swallowed any failure too), so there was no way
   // to tell whether it was working, or silently skipping at one of the early returns below.
@@ -830,15 +841,60 @@ async function pushProgress(userId, bookId, percentage) {
     try { if (!tokens.has(userId)) await login(userId, ctx); }
     catch (e) { console.warn(`[bookorbit] user ${userId}: progress push skipped for book ${bookId} — login failed: ${e.message}`); return; }
     const pct = Math.max(0, Math.min(100, Math.round(percentage * 10000) / 100));
-    await api(userId, ctx, 'POST', `/books/files/${m.boFileId}/progress`, { percentage: pct });
-    console.log(`[bookorbit] user ${userId}: pushed live progress ${pct}% for book ${bookId}`);
+    const body = { percentage: pct, ...(xpointer ? { koreaderProgress: xpointer } : {}) };
+    await api(userId, ctx, 'POST', `/books/files/${m.boFileId}/progress`, body);
+    console.log(`[bookorbit] user ${userId}: pushed live progress ${pct}% for book ${bookId}${xpointer ? ' (xpointer included)' : ''}`);
   } catch (e) {
     console.warn(`[bookorbit] user ${userId}: progress push error for book ${bookId}:`, e.message);
   }
 }
 
-function triggerProgressPush(userId, bookId, percentage) {
-  setImmediate(() => { pushProgress(userId, bookId, percentage).catch(() => {}); });
+function triggerProgressPush(userId, bookId, percentage, xpointer) {
+  setImmediate(() => { pushProgress(userId, bookId, percentage, xpointer).catch(() => {}); });
+}
+
+// ── live progress pull (BookOrbit-native, no KOSync server required) ──────────
+// Mirrors pushProgress()'s GET counterpart: BookOrbit's own SaveProgressDto endpoint
+// (GET /books/files/:fileId/progress) reflects the *shared* reading_progress row, which
+// BookOrbit's own koreader module keeps merged with whatever any KOReader-protocol
+// client (Xteink X4, or Codexa itself when kosync_url used to point here) last pushed —
+// see koreader.service.ts's applySharedProgress(). So this single native call is a
+// reasonable stand-in for the generic kosync_url "ext" source when the user has no
+// external KOSync server configured (or never configured one, and relies on BookOrbit
+// alone) — it's the same underlying position, reached through BookOrbit's own account
+// login instead of the separate KOReader-plugin sub-account.
+// Returns null (not an error) whenever there's nothing usable to report, exactly like
+// fetchRemoteProgress()'s "no kosync_url configured" case client-side.
+// NOTE (confirmed live 2026-09-09): BookOrbit's reading_progress.percentage is 0-100,
+// not 0-1 — pushProgress() above already converts the other way for the same reason.
+// NOTE: BookOrbit's saveProgress() overwrites cfi/koreaderProgress with null on any push
+// that doesn't include them — which is exactly what pushProgress() above sends (percentage
+// only) — so koreaderProgress here is frequently null right after Codexa's own push, not a
+// sign of anything wrong; callers should treat it as an optional refinement, same as the
+// kosync "ext" source already does when .progress is empty.
+async function getProgress(userId, bookId) {
+  try {
+    const ctx = getContext(userId);
+    if (!ctx) return null;
+    const db = getDb();
+    const resolved = await resolveBooks(db, userId, ctx, { bookId });
+    const m = resolved[0];
+    if (!m || !m.boFileId) return null;
+    const res = await api(userId, ctx, 'GET', `/books/files/${m.boFileId}/progress`);
+    if (!res.ok || !res.data) return null;
+    const pct = typeof res.data.percentage === 'number' ? res.data.percentage / 100 : 0;
+    const updatedAt = res.data.updatedAt ? Math.floor(new Date(res.data.updatedAt).getTime() / 1000) : 0;
+    return {
+      percentage: pct,
+      progress: res.data.koreaderProgress || null,
+      timestamp: updatedAt,
+      device: 'bookorbit',
+      device_id: 'bookorbit-native',
+    };
+  } catch (e) {
+    console.warn(`[bookorbit] user ${userId}: progress pull error for book ${bookId}:`, e.message);
+    return null;
+  }
 }
 
 module.exports = {
@@ -858,6 +914,7 @@ module.exports = {
   mapLocalBook,
   pushProgress,
   triggerProgressPush,
+  getProgress,
   getLastStatus,
   checkReachable,
 };

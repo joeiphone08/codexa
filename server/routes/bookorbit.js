@@ -47,6 +47,20 @@ router.get('/last-status', (req, res) => {
   res.json(bookorbit.getLastStatus(req.user.id));
 });
 
+// GET /api/bookorbit/progress/:bookId — BookOrbit-native cross-device progress pull, used by
+// the reader as a candidate source alongside the generic kosync_url "ext" one. Needed because
+// that KOSync proxy is entirely opt-in (a separate kosync_url setting) — a user who relies on
+// BookOrbit alone for cross-device sync (no external KOSync server configured at all) otherwise
+// has no pull path whatsoever, only push (see triggerProgressPush, called from every KOSync-
+// internal write regardless of whether kosync_url is set). Returns null (200, not an error)
+// whenever there's nothing usable — same "quietly nothing to report" contract as
+// fetchRemoteProgress()'s missing-kosync_url case client-side.
+router.get('/progress/:bookId', async (req, res) => {
+  const bookId = parseInt(req.params.bookId, 10);
+  if (!Number.isFinite(bookId)) return res.json(null);
+  res.json(await bookorbit.getProgress(req.user.id, bookId));
+});
+
 // Thin GET proxy for the simple "list everything" endpoints. Forwards `q`/`page`/`size` when
 // present — series and authors are genuinely paginated server-side (default page size 50);
 // libraries/collections/smart-scopes ignore page/size since BookOrbit returns them as a flat,

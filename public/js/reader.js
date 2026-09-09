@@ -8,7 +8,7 @@ import { stripImageWhiteBackgrounds } from './img-bg-fix.js';
 import { createComicViewer } from './comic-viewer.js';
 import { renderPdfCoverBlob, uploadPdfCover } from './pdf-cover.js';
 
-const READER_BUILD = 'br-v95-pdf-peek-cover-fix';
+const READER_BUILD = 'br-v97-bookorbit-native-pull';
 const _i18nReady = initI18n();
 log('[codexa] reader build', READER_BUILD);
 
@@ -5435,10 +5435,33 @@ async function fetchInternalProgress(docKey) {
   catch { return null; }
 }
 
+// BookOrbit-native progress pull — independent of kosync_url (the generic external KOSync
+// server setting). Without this, a user relying on BookOrbit alone for cross-device sync (no
+// external kosync_url configured) has a push path (triggerProgressPush, fired unconditionally
+// on every KOSync-internal write) but no pull path at all: fetchRemoteProgress() above quietly
+// no-ops with "no kosync_url configured" and there is nothing else to fall back to. Server-side
+// this reads BookOrbit's own reading_progress row (server/services/bookorbitSync.js's
+// getProgress()), which BookOrbit itself keeps merged with whatever any KOReader-protocol
+// client (Xteink X4 included) last pushed it — so it's a reasonable stand-in for the same
+// cross-device signal, reached through the BookOrbit account login instead.
+async function fetchBookorbitProgress() {
+  if (!currentBook?.id) return null;
+  try { return await apiFetch(`/bookorbit/progress/${currentBook.id}`); }
+  catch { return null; }
+}
+
 async function pushRemoteProgress(docKey, xpointer, pct) {
   try {
     const r = await apiFetch(`/kosync/remote/${encodeURIComponent(docKey)}`, {
       method: 'PUT',
+      // keepalive: this fires synchronously off a page turn (chapter-boundary push, see
+      // _cxRelocatedHandler), not just on close — without it, a device that suspends JS
+      // right after the turn (screen sleep, e-ink cover close) can drop the request in
+      // flight, leaving the server's stored position a page short of where the user
+      // actually was. saveProgressBackground already used keepalive for the close path;
+      // this extends the same protection to the immediate mid-session push. Payload here
+      // is a few dozen bytes, nowhere near keepalive's ~64KB body limit.
+      keepalive: true,
       body: JSON.stringify({
         document:   docKey,
         progress:   xpointer,
@@ -5468,6 +5491,7 @@ function pushInternalProgress(docKey, xpointer, pct, force = false) {
   const qs = force ? '?force=1' : '';
   return apiFetch(`/kosync/internal/${encodeURIComponent(docKey)}${qs}`, {
     method: 'PUT',
+    keepalive: true, // see pushRemoteProgress's comment — same mid-session-suspend risk
     body: JSON.stringify({ progress: xpointer, percentage: pct, device: 'Codexa', device_id: 'codexa-web' }),
   }).catch(() => {});
 }
@@ -5577,6 +5601,7 @@ async function saveProgress({ forceRemote = false, allowRemote = true, inSession
   const saves = [
     apiFetch(`/progress/${currentBook.file_hash}`, {
       method: 'PUT',
+      keepalive: true, // see pushRemoteProgress's comment — same mid-session-suspend risk
       body: JSON.stringify(progressPayload),
     }).then(() => {
       if (pct > 0) {
@@ -5696,23 +5721,28 @@ function showSyncDialog(best, localPct, localTime) {
 async function syncOnOpen(localProgress) {
   const docKey = externalDocKey();
   log('[kosync] syncOnOpen docKey:', docKey);
-  const [extResult, intResult] = await Promise.allSettled([
+  const [extResult, intResult, boResult] = await Promise.allSettled([
     fetchRemoteProgress(docKey),
     fetchInternalProgress(docKey),
+    fetchBookorbitProgress(),
   ]);
   const ext = extResult.status === 'fulfilled' ? extResult.value : null;
   const int = intResult.status === 'fulfilled' ? intResult.value : null;
-  log('[kosync] remote:', ext, 'internal:', int);
+  const bo  = boResult.status  === 'fulfilled' ? boResult.value  : null;
+  log('[kosync] remote:', ext, 'internal:', int, 'bookorbit:', bo);
 
   // Pick the freshest remote source. A source is usable if it has a numeric percentage —
   // that's all the percentage-based jump below actually needs; .progress (a KOReader
   // xpointer string) is only an optional precision refinement, so a percentage-only
   // response (progress:null, as returned by some KOSync-compatible servers) must not be
-  // discarded outright.
+  // discarded outright. `bo` (BookOrbit-native, see fetchBookorbitProgress) is checked
+  // alongside ext/int rather than only when kosync_url is unset — BookOrbit's own row can
+  // legitimately be the freshest of the three regardless.
   const hasPosition = r => r && typeof r.percentage === 'number';
   let best = null;
   if (hasPosition(ext)) best = ext;
   if (hasPosition(int) && (!best || (int.timestamp || 0) > (best.timestamp || 0))) best = int;
+  if (hasPosition(bo)  && (!best || (bo.timestamp  || 0) > (best.timestamp || 0))) best = bo;
   if (!hasPosition(best)) {
     log('[kosync] no remote progress found');
     return null;
@@ -5778,16 +5808,19 @@ async function networkRestoreSync() {
   if (!currentBook || !isReady) return;
   try {
     const docKey = externalDocKey();
-    const [extResult, intResult] = await Promise.allSettled([
+    const [extResult, intResult, boResult] = await Promise.allSettled([
       fetchRemoteProgress(docKey),
       fetchInternalProgress(docKey),
+      fetchBookorbitProgress(),
     ]);
     const ext = extResult.status === 'fulfilled' ? extResult.value : null;
     const int = intResult.status === 'fulfilled' ? intResult.value : null;
+    const bo  = boResult.status  === 'fulfilled' ? boResult.value  : null;
     const hasPosition = r => r && typeof r.percentage === 'number';
     let best = null;
     if (hasPosition(ext)) best = ext;
     if (hasPosition(int) && (!best || (int.timestamp || 0) > (best.timestamp || 0))) best = int;
+    if (hasPosition(bo)  && (!best || (bo.timestamp  || 0) > (best.timestamp || 0))) best = bo;
     if (!hasPosition(best)) { log('[kosync] networkRestoreSync: no remote progress found'); return; }
 
     const remotePct = best.percentage || 0;
@@ -7728,7 +7761,7 @@ document.getElementById('kosync-zone-bl')?.addEventListener('click', async () =>
   if (!await kosyncConfirm('pull')) return;
 
   const docKey = externalDocKey();
-  const [extResult, intResult, ownResult] = await Promise.allSettled([
+  const [extResult, intResult, ownResult, boResult] = await Promise.allSettled([
     apiFetch(`/kosync/remote/${encodeURIComponent(docKey)}`),
     apiFetch(`/kosync/internal/${encodeURIComponent(docKey)}`),
     // Codexa's own cross-device progress (independent of KOSync, always kept up to date
@@ -7736,9 +7769,12 @@ document.getElementById('kosync-zone-bl')?.addEventListener('click', async () =>
     // ever refetching it (e.g. resumed from a WebView paused/backgrounded state rather
     // than a fresh navigation), so a manual pull needs to check it too, not just KOSync.
     apiFetch(`/progress/${encodeURIComponent(currentBook.file_hash)}`),
+    // BookOrbit-native (see fetchBookorbitProgress) — the only pull path when kosync_url
+    // isn't configured, but checked here too since it can be freshest either way.
+    fetchBookorbitProgress(),
   ]);
 
-  if (extResult.status === 'rejected' && intResult.status === 'rejected' && ownResult.status === 'rejected') {
+  if (extResult.status === 'rejected' && intResult.status === 'rejected' && ownResult.status === 'rejected' && boResult.status === 'rejected') {
     toast.error(t('reader.kosync_fetch_error'));
     return;
   }
@@ -7746,6 +7782,7 @@ document.getElementById('kosync-zone-bl')?.addEventListener('click', async () =>
   const ext = extResult.status === 'fulfilled' ? extResult.value : null;
   const int = intResult.status === 'fulfilled' ? intResult.value : null;
   const ownRaw = ownResult.status === 'fulfilled' ? ownResult.value : null;
+  const bo  = boResult.status  === 'fulfilled' ? boResult.value  : null;
   // Reshaped to the same { percentage, progress, timestamp, device } shape as ext/int so
   // it can be compared alongside them; it has no KOReader xpointer, only a plain percentage.
   const own = (ownRaw && typeof ownRaw.percentage === 'number')
@@ -7754,13 +7791,14 @@ document.getElementById('kosync-zone-bl')?.addEventListener('click', async () =>
 
   // Pick the freshest usable source. A source is usable if it has a numeric percentage —
   // .progress (KOReader xpointer) is only an optional precision refinement, never required
-  // to jump (see the percentage-only navigation below). Checked ext → int → own so own only
-  // wins ties against ext/int if strictly newer, matching the existing int-vs-ext tie-break.
+  // to jump (see the percentage-only navigation below). Checked ext → int → own → bo so each
+  // only wins ties against an earlier one if strictly newer, matching the existing tie-break.
   const hasPosition = r => r && typeof r.percentage === 'number';
   let best = null;
   if (hasPosition(ext)) best = ext;
   if (hasPosition(int) && (!best || (int.timestamp || 0) > (best.timestamp || 0))) best = int;
   if (hasPosition(own) && (!best || (own.timestamp || 0) > (best.timestamp || 0))) best = own;
+  if (hasPosition(bo)  && (!best || (bo.timestamp  || 0) > (best.timestamp || 0))) best = bo;
 
   if (!hasPosition(best)) { toast.info(t('reader.kosync_no_progress')); return; }
 

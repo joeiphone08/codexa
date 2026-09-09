@@ -304,9 +304,11 @@ proxyRouter.put('/internal/:document', (req, res) => {
   // This endpoint is hit at every genuine KOSync push point (chapter boundary, manual
   // push, close) regardless of whether the internal KOReader-sync-server feature below
   // is enabled — so it's also the right place to mirror progress into BookOrbit.
+  // `progress` (the xpointer) is forwarded too — see triggerProgressPush's own comment
+  // for why leaving it out was actively breaking other KOReader-protocol clients.
   if (bookorbit.isEnabled(req.user.id)) {
     const bookId = findBookIdForDocument(req.user.id, req.params.document);
-    if (bookId != null) bookorbit.triggerProgressPush(req.user.id, bookId, pct);
+    if (bookId != null) bookorbit.triggerProgressPush(req.user.id, bookId, pct, progress);
   }
 
   if (!isInternalEnabled(req.user.id)) return res.json({ skipped: true });
