@@ -525,6 +525,22 @@
           </div>
         </div>
 
+        <!-- Remove book blur while settings are open -->
+        <div class="setting-row" id="setting-row-settings-no-blur">
+          <div class="setting-row-inline">
+            <div>
+              <div class="setting-label" data-i18n="reader.sb_settings_no_blur">Odstrani zameglitev knjige, ko so nastavitve odprte</div>
+              <div style="font-size:.75rem;color:var(--color-text-muted);margin-top:.15rem" data-i18n="reader.sb_settings_no_blur_hint">
+                Besedilo za nastavitvami ostane ostro, da vidiš učinek pisave, robov in razmika sproti
+              </div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="settings-no-blur-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
         <div class="settings-divider"></div>
 
         <!-- Header button visibility -->
@@ -1286,7 +1302,7 @@
        cross-origin requests are deliberately left uncached by sw.js, and third-party CDN
        resources aren't reliably available offline in iOS home-screen PWAs. -->
   <script src="/js/vendor/jszip.min.js"></script>
-  <script type="module" src="/js/reader.js?v=br-v124"></script>
+  <script type="module" src="/js/reader.js?v=br-v126"></script>
   <script src="/js/sw-register.js"></script>
 </body>
 </html>

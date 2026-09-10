@@ -344,6 +344,8 @@
   "reader.sb_hyphenation_lang_auto": "Automático (del libro)",
   "reader.sb_page_shadow": "Borde de página (lomo)",
   "reader.sb_page_shadow_hint": "Borde oscuro entre páginas en modo de dos páginas",
+  "reader.sb_settings_no_blur": "Quitar el desenfoque del libro con los ajustes abiertos",
+  "reader.sb_settings_no_blur_hint": "Mantén nítido el texto detrás de los ajustes para previsualizar en vivo los cambios de fuente, márgenes y espaciado",
   "reader.header_btns_title": "Botones de cabecera",
   "reader.header_btn_annotations": "Resaltados",
   "reader.header_btn_search": "Búsqueda",

@@ -344,6 +344,8 @@
   "reader.sb_hyphenation_lang_auto": "自动（来自书籍）",
   "reader.sb_page_shadow": "页面边框（书脊）",
   "reader.sb_page_shadow_hint": "双页模式下页面之间的深色边框",
+  "reader.sb_settings_no_blur": "打开设置时不模糊书页",
+  "reader.sb_settings_no_blur_hint": "设置面板后的文字保持清晰，便于实时预览字体、页边距和行距的变化",
   "reader.header_btns_title": "标题栏按钮",
   "reader.header_btn_annotations": "高亮",
   "reader.header_btn_search": "搜索",

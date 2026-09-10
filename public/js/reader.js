@@ -8,7 +8,7 @@ import { stripImageWhiteBackgrounds } from './img-bg-fix.js';
 import { createComicViewer } from './comic-viewer.js';
 import { renderPdfCoverBlob, uploadPdfCover } from './pdf-cover.js';
 
-const READER_BUILD = 'br-v97-bookorbit-native-pull';
+const READER_BUILD = 'br-v99-settings-no-blur-eink';
 const _i18nReady = initI18n();
 log('[codexa] reader build', READER_BUILD);
 
@@ -275,6 +275,7 @@ const DEFAULT_PREFS = {
   hyphenLang:     '',           // empty = keep book's own lang attr; else override e.g. 'en'
   bionicReading:  false,        // emphasize word prefixes for easier scanning
   pageGapShadow:  false,        // show center-spine box-shadow in two-page mode
+  settingsNoBlur: false,        // don't dim/blur the book behind the settings panel (live style preview)
   dictionaries:   [],           // enabled dict IDs in priority order; null = all disabled; empty = use all
   dictionaryOrder: [],          // all dict IDs in user's display order (including disabled ones)
   edgePadding:    { top: 0, bottom: 0, left: 0, right: 0 },   // px inset for curved screens
@@ -4629,6 +4630,15 @@ function syncSettingsUi() {
   if (bionicEl) bionicEl.checked = prefs.bionicReading;
   const pgShadowEl = document.getElementById('page-gap-shadow-toggle');
   if (pgShadowEl) pgShadowEl.checked = prefs.pageGapShadow;
+  const noBlurEl = document.getElementById('settings-no-blur-toggle');
+  if (noBlurEl) {
+    noBlurEl.checked = prefs.settingsNoBlur;
+    // E-ink mode already forces the no-dim backdrop (see reader.css) — the toggle would do
+    // nothing, so lock it rather than let it look interactive.
+    noBlurEl.disabled = !!prefs.eink;
+    document.getElementById('setting-row-settings-no-blur')?.classList.toggle('setting-disabled', !!prefs.eink);
+  }
+  document.body.classList.toggle('settings-no-blur', !!prefs.settingsNoBlur);
   const fnbEl = document.getElementById('float-nav-btn-toggle');
   if (fnbEl) fnbEl.checked = prefs.floatNavBtn;
   const fnbOpEl = document.getElementById('float-nav-btn-opacity-slider');
@@ -5104,7 +5114,7 @@ function initSettingsUi() {
 
   document.getElementById('eink-toggle').addEventListener('change', (e) => {
     prefs.eink = e.target.checked;
-    applyUiTheme(); reapplyStyles(); persistPrefs();
+    applyUiTheme(); reapplyStyles(); syncSettingsUi(); persistPrefs();
   });
 
   // Paragraph options
@@ -5229,6 +5239,11 @@ function initSettingsUi() {
   document.getElementById('page-gap-shadow-toggle')?.addEventListener('change', (e) => {
     prefs.pageGapShadow = e.target.checked;
     applyPageShadow(); persistPrefs();
+  });
+  document.getElementById('settings-no-blur-toggle')?.addEventListener('change', (e) => {
+    prefs.settingsNoBlur = e.target.checked;
+    document.body.classList.toggle('settings-no-blur', prefs.settingsNoBlur);
+    persistPrefs();
   });
   document.getElementById('page-turn-drag-toggle')?.addEventListener('change', (e) => {
     prefs.pageTurnDrag = e.target.checked;

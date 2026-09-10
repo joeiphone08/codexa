@@ -344,6 +344,8 @@
   "reader.sb_hyphenation_lang_auto": "Automatica (dal libro)",
   "reader.sb_page_shadow": "Ombra pagina (rilegatura)",
   "reader.sb_page_shadow_hint": "Margine scuro tra le pagine in modalità a due colonne",
+  "reader.sb_settings_no_blur": "Rimuovi la sfocatura del libro quando le impostazioni sono aperte",
+  "reader.sb_settings_no_blur_hint": "Mantiene nitido il testo dietro le impostazioni per vedere in tempo reale le modifiche a carattere, margini e spaziatura",
   "reader.header_btns_title": "Pulsanti intestazione",
   "reader.header_btn_annotations": "Evidenziazioni",
   "reader.header_btn_search": "Ricerca",

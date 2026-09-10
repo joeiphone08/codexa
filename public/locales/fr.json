@@ -344,6 +344,8 @@
   "reader.sb_hyphenation_lang_auto": "Automatique (depuis le livre)",
   "reader.sb_page_shadow": "Ombre de page (pliure)",
   "reader.sb_page_shadow_hint": "Bordure sombre entre les pages en mode deux colonnes",
+  "reader.sb_settings_no_blur": "Supprimer le flou du livre quand les réglages sont ouverts",
+  "reader.sb_settings_no_blur_hint": "Garde net le texte derrière les réglages pour prévisualiser en direct les changements de police, de marges et d'espacement",
   "reader.header_btns_title": "Boutons d'en-tête",
   "reader.header_btn_annotations": "Surlignages",
   "reader.header_btn_search": "Recherche",

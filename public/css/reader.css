@@ -910,6 +910,23 @@ body.page-gap-shadow-on #settings-panel {
 }
 #panel-backdrop.visible { display: block; }
 
+/* "Remove book blur when settings are open" (prefs.settingsNoBlur): keep the backdrop present
+   (it still captures the tap-to-close), but drop the dim + blur so the book stays legible for a
+   live font/margin/line-spacing preview. Scoped to the settings panel only — TOC, search,
+   bookmarks and annotations still dim as before. E-ink mode always gets this behaviour
+   regardless of the toggle (a flat 55% overlay just muddies an e-ink screen, and blur is a
+   no-op there anyway) — the toggle itself is disabled in that mode, see syncSettingsUi(). */
+body.settings-no-blur #settings-panel.open ~ #panel-backdrop,
+[data-reader-eink] #settings-panel.open ~ #panel-backdrop {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* A setting row locked because another setting overrides it (e.g. this one under e-ink mode). */
+.setting-row.setting-disabled { opacity: .45; }
+.setting-row.setting-disabled .toggle { pointer-events: none; }
+
 /* ── TOC sidebar ─────────────────────────────────────────────────────────────── */
 #toc-sidebar {
   position: fixed;
