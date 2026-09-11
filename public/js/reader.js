@@ -8,7 +8,7 @@ import { stripImageWhiteBackgrounds } from './img-bg-fix.js';
 import { createComicViewer } from './comic-viewer.js';
 import { renderPdfCoverBlob, uploadPdfCover } from './pdf-cover.js';
 
-const READER_BUILD = 'br-v101-color-picker-docked';
+const READER_BUILD = 'br-v104-progbar-live-refresh';
 const _i18nReady = initI18n();
 log('[codexa] reader build', READER_BUILD);
 
@@ -362,6 +362,12 @@ const _globalPrefsSnapshot = { ...prefs };
 // e-ink device and a phone can each stay on their own preset instead of the last device to
 // switch overwriting every other device's choice.
 let activePresetId = loadActivePresetId();
+// The active preset's own updated_at as of the last time it was actually applied to prefs —
+// lets loadPresetsList() tell "this preset was edited elsewhere, refresh" apart from "nothing
+// changed", so it only reapplies (and so only overwrites whatever live, unsaved edits this
+// session has made) when the preset genuinely has newer content. See loadPresetsList()'s own
+// comment for the bug this fixes.
+let activePresetAppliedAt = loadActivePresetAppliedAt();
 let currentCfi   = '';
 let currentPct        = 0;
 let lastKnownGoodPct  = 0;
@@ -655,6 +661,7 @@ function persistPrefs() {
   // the overrides so global prefs naturally reflect the last used values for each book context.
   localStorage.setItem('br_reader_prefs', JSON.stringify(prefs));
   localStorage.setItem('br_active_preset_id', JSON.stringify(activePresetId));
+  localStorage.setItem('br_active_preset_applied_at', JSON.stringify(activePresetAppliedAt));
   // Also track per-book overrides when a book is open
   if (currentBook?.id) saveBookPrefs(currentBook.id);
   renderPresetsUi();
@@ -683,6 +690,13 @@ function loadActivePresetId() {
   } catch { return null; }
 }
 
+function loadActivePresetAppliedAt() {
+  try {
+    const raw = localStorage.getItem('br_active_preset_applied_at');
+    return raw != null ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
 async function loadPresetsList() {
   try {
     presetsList = await apiFetch('/settings/presets');
@@ -692,12 +706,24 @@ async function loadPresetsList() {
     renderPresetsUi();
     return presetsList;
   }
-  // This device remembers it was using a preset — refresh to the latest saved version (it
-  // may have been edited from another device since applying it here) so this device stays
-  // consistent with that preset rather than a possibly-stale local copy of its content.
+  // This device remembers it was using a preset — refresh to the latest saved version if it
+  // was edited from another device since applying it here, so this device stays consistent
+  // with that preset rather than a possibly-stale local copy of its content. Gated on
+  // updated_at actually having moved on: this runs on every book open (initSettingsUi →
+  // loadPresetsList), and reapplying unconditionally — as this used to — meant any live,
+  // unsaved edit (e.g. a status-bar layout tweak never explicitly re-saved into the preset)
+  // silently reverted the moment a different book was opened. Confirmed live as the cause of
+  // exactly that.
   if (activePresetId != null) {
-    if (presetsList.some(p => p.id === activePresetId)) applyPreset(activePresetId);
-    else { activePresetId = null; persistPrefs(); } // preset was deleted elsewhere
+    const preset = presetsList.find(p => p.id === activePresetId);
+    if (preset) {
+      // applyPreset() renders the presets UI itself (via persistPrefs()); when skipping it,
+      // do so here instead so a rename/addition elsewhere still shows up.
+      if (preset.updated_at !== activePresetAppliedAt) applyPreset(activePresetId);
+      else renderPresetsUi();
+    } else {
+      activePresetId = null; activePresetAppliedAt = null; persistPrefs(); // preset was deleted elsewhere
+    }
   } else {
     renderPresetsUi();
   }
@@ -716,6 +742,7 @@ async function saveCurrentAsPreset(name) {
   });
   presetsList.push(preset);
   activePresetId = preset.id;
+  activePresetAppliedAt = preset.updated_at ?? null; // prefs === preset content right now
   persistPrefs();
   return preset;
 }
@@ -727,6 +754,9 @@ async function updatePreset(id) {
   });
   const i = presetsList.findIndex(p => p.id === id);
   if (i !== -1) presetsList[i] = preset;
+  // prefs === preset content right now (we just saved them into it) — record that so the
+  // next loadPresetsList() doesn't see its own bumped updated_at as "changed elsewhere".
+  if (id === activePresetId) activePresetAppliedAt = preset.updated_at ?? null;
   renderPresetsUi();
   return preset;
 }
@@ -747,6 +777,7 @@ async function deletePreset(id) {
   presetsList = presetsList.filter(p => p.id !== id);
   if (activePresetId === id) {
     activePresetId = null;
+    activePresetAppliedAt = null;
     persistPrefs();
   } else {
     renderPresetsUi();
@@ -760,6 +791,7 @@ async function deletePreset(id) {
 function applyPreset(id) {
   const preset = presetsList.find(p => p.id === id);
   if (!preset) return;
+  activePresetAppliedAt = preset.updated_at ?? null;
   const { dictionaries, dictionaryOrder, dictionaryMeta, ...rest } = preset.prefs;
 
   // bionicReading rewrites the chapter DOM at render time (word-prefix spans); like its own
@@ -4747,14 +4779,21 @@ function renderStatusSlots() {
     sbBl.innerHTML = [leftVal,  blOther].filter(Boolean).join('  |  ');
     sbBc.innerHTML = bcSlot;
     sbBr.innerHTML = [brOther, rightVal].filter(Boolean).join('  |  ');
-    sbBottom.classList.toggle('two-page-no-center', !bcSlot);
   } else {
     sbBottom.classList.remove('two-page');
-    sbBottom.classList.remove('two-page-no-center');
     sbBl.innerHTML = computeSlot(pos.bl);
     sbBc.innerHTML = computeSlot(pos.bc);
     sbBr.innerHTML = computeSlot(pos.br);
   }
+
+  // An empty slot (nothing assigned there, or everything assigned to it currently has no
+  // value) collapses to zero width instead of still reserving its 1/3 share — the remaining
+  // non-empty slot(s) in that bar (still flex:1, see reader.css) then expand to fill the
+  // freed space. Without this, a lone center item (e.g. book+chapter title) was stuck
+  // truncating inside 1/3 of the bar even with the other two-thirds sitting empty.
+  [[sbTl, sbTc, sbTr], [sbBl, sbBc, sbBr]].forEach(slots => {
+    slots.forEach(el => el.classList.toggle('sb-slot-empty', !el.innerHTML));
+  });
 }
 
 function renderSbItems() {
@@ -6154,6 +6193,17 @@ function _cxRelocatedHandler(e) {
   log(`[CXReader] relocated spine=${spineIndex} page=${page}/${pageCount} pct=${(currentPct*100).toFixed(1)}%`);
   trackReadingSpeed();
   renderStatusSlots();
+  // Book/chapter progress bar fill % (updateBookProgressBar/updateChapProgressBar) is only
+  // ever otherwise recomputed from a settings change — nothing previously kept it live as
+  // pages turned. This also re-asserts the bars' display:'' on every relocate, which is what
+  // actually fixes the real-world symptom: enabling a progress bar, closing the book, and
+  // reopening it left the bar checked-but-invisible until some unrelated settings toggle
+  // incidentally called applyProgressBarLayout() again. initSettingsUi()'s own call happens
+  // once, early, before the book has rendered a single page — this piggybacks on the same
+  // "runs on every real page render" guarantee renderStatusSlots() already relies on, so a
+  // freshly opened book gets a correct, live-updating bar without depending on that first
+  // call landing at exactly the right moment.
+  applyProgressBarLayout();
   updateActiveTocItem(href);
   // First cx-relocated: status bars now have content → measure real inset and reinit
   // paginator so page boundaries reflect the visible area (not the full viewer height).

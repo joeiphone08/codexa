@@ -1973,11 +1973,17 @@ html.no-flexgap .spread-buttons.page-anim-grid > * + * { margin-left: 0; }
 .sb-slot:first-child  { text-align: left; }
 .sb-slot:nth-child(2) { text-align: center; }
 .sb-slot:last-child   { text-align: right; }
+/* An empty slot (nothing assigned there, or everything assigned currently has no value —
+   toggled in renderStatusSlots()) collapses to zero width instead of still reserving its
+   1/3 share; the remaining non-empty slot(s) in that bar (still flex:1 above) then grow to
+   fill the freed space. This is what stops a lone center item (e.g. book + chapter title)
+   from truncating inside 1/3 of the bar while the other two-thirds sit empty — and, as a
+   side effect, subsumes what used to be a two-page-bottom-bar-only special case for an
+   empty center slot (now just one instance of the same general rule). */
+.sb-slot.sb-slot-empty { flex: 0; min-width: 0; padding: 0; overflow: hidden; }
 /* Two-page mode: bl = left page (left-aligned), br = right page (right-aligned) */
-/* BC collapse is handled in JS (only collapsed when empty) */
 .sb-bar-bottom.two-page .sb-slot:first-child  { text-align: left; }
 .sb-bar-bottom.two-page .sb-slot:last-child   { text-align: right; }
-.sb-bar-bottom.two-page-no-center .sb-slot:nth-child(2) { flex: 0; min-width: 0; padding: 0; overflow: hidden; }
 /* Separator lines — positioned just below the top bar or just above the bottom bar */
 .sb-separator {
   position: absolute;
