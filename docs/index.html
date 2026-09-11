@@ -1140,6 +1140,12 @@ staticPasswords:
 <li>Click <strong>Add server</strong> to save.</li>
 <li>Each saved server has <strong>Open</strong> (go to Online library), <strong>Edit</strong>, and <strong>Delete</strong> buttons.</li>
 </ul>
+<div class="callout">
+<strong>Authentication</strong>
+        Both Basic and Digest HTTP authentication are supported and detected automatically — just
+        enter the username and password, no need to know which scheme the server uses. This
+        matters for <strong>Calibre's</strong> built-in content server, which defaults to Digest.
+      </div>
 <h2 id="settings-dicts">Dictionaries</h2>
 <p>
         Every user can configure their own dictionary preferences independently — changes
@@ -1335,9 +1341,9 @@ staticPasswords:
 <h2 id="opds-start">Getting Started</h2>
 <p>
         OPDS (Open Publication Distribution System) is a standard catalog format supported by
-        Calibre-Web, BookOrbit, Booklore, Komga, Kavita, Ubooquity, Bookwyrm, and many other self-hosted
-        book servers. There are also a number of public OPDS catalogs available online. To browse an OPDS
-        catalog, you must first add it as a server in Codexa.
+        Calibre, Calibre-Web, BookOrbit, Booklore, Komga, Kavita, Ubooquity, Bookwyrm, and many other
+        self-hosted book servers. There are also a number of public OPDS catalogs available online. To
+        browse an OPDS catalog, you must first add it as a server in Codexa.
       </p>
 <ol class="steps">
 <li>Go to <strong>Settings → OPDS Servers</strong> and add at least one server (name, URL, and optional credentials).</li>
@@ -2418,10 +2424,11 @@ staticPasswords:
 </figure>
 </div>
 <ul>
-<li><strong>Theme:</strong> Light, Sepia, Dark, Sepia Dark, Midnight, Nord, Custom. Selecting <em>Custom</em> reveals a background colour picker and a text colour picker.</li>
+<li><strong>Theme:</strong> Light, Sepia, Dark, Sepia Dark, Midnight, Nord, Custom. Selecting <em>Custom</em> reveals a background colour picker and a text colour picker — a saturation/brightness square, a hue slider, and hex/RGB fields you can type into directly, identical on desktop and mobile (including Android, where the old native picker offered no numeric input at all).</li>
 <li><strong>Override book styles:</strong> forces the reader's fonts and colours on books with their own CSS.</li>
 <li><strong>E-ink mode:</strong> high-contrast black-and-white for e-ink displays.</li>
 <li><strong>Page border (book spine):</strong> shows a thin shadow along the centre spine in two-page spread mode.</li>
+<li><strong>Remove book blur when settings are open:</strong> keeps the book text sharp and un-dimmed behind the settings panel (and the color picker) instead of the usual blurred backdrop, so you can watch font, margin, and colour changes apply live. Always on under e-ink mode, where dimming/blurring the page isn't useful anyway.</li>
 <li><strong>Presets:</strong> save and switch between named settings profiles — see <a data-scroll="themes-presets" data-section="themes" href="#themes-presets">Presets</a>.</li>
 </ul>
 <h4>Header buttons</h4>
@@ -2521,6 +2528,12 @@ staticPasswords:
 <p>
         Place information overlays in up to six positions around the reading area: top-left,
         top-centre, top-right, bottom-left, bottom-centre, bottom-right.
+      </p>
+<p>
+        An empty position doesn't reserve any space — it collapses so the position(s) actually in
+        use on that bar stretch to fill the room instead. A single centred item (e.g. book title +
+        chapter title) with nothing set to either side uses the entire bar width rather than being
+        squeezed into a third of it.
       </p>
 <div class="code-block">
 <pre><code>[ top-left ]   [ top-centre ]   [ top-right ]
@@ -2873,8 +2886,8 @@ staticPasswords:
 </tr>
 <tr>
 <td><strong>Live reading progress</strong></td>
-<td>Codexa → BookOrbit</td>
-<td>Pushed on every KOReader/KOSync sync, not just when you close the book, so BookOrbit's own reader and other clients see your current position sooner</td>
+<td>Two-way</td>
+<td>Pushed on every KOReader/KOSync sync, not just when you close the book, so BookOrbit's own reader and other clients see your current position sooner. Also pulled from BookOrbit when you open a book or reconnect, as a cross-device position source in its own right — this works even if you haven't set up an external KOSync server under <a data-scroll="settings-kosync" data-section="settings" href="#settings-kosync">KOReader Sync</a>.</td>
 </tr>
 <tr>
 <td><strong>Read status</strong></td>
