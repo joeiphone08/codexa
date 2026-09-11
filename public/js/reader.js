@@ -8,7 +8,7 @@ import { stripImageWhiteBackgrounds } from './img-bg-fix.js';
 import { createComicViewer } from './comic-viewer.js';
 import { renderPdfCoverBlob, uploadPdfCover } from './pdf-cover.js';
 
-const READER_BUILD = 'br-v99-settings-no-blur-eink';
+const READER_BUILD = 'br-v101-color-picker-docked';
 const _i18nReady = initI18n();
 log('[codexa] reader build', READER_BUILD);
 
@@ -87,6 +87,38 @@ function mixHex(h1, h2, t) {
   const b = Math.round(p(h1.slice(5,7)) + (p(h2.slice(5,7))-p(h1.slice(5,7)))*t);
   return '#'+r.toString(16).padStart(2,'0')+g.toString(16).padStart(2,'0')+b.toString(16).padStart(2,'0');
 }
+// ── Color conversions (shared by openColorPicker) ──────────────────────────────
+function clamp255(n) { return Math.max(0, Math.min(255, Math.round(n))); }
+function hexToRgbObj(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+function rgbObjToHex({ r, g, b }) {
+  return '#' + [r, g, b].map(c => clamp255(c).toString(16).padStart(2, '0')).join('');
+}
+// h: 0-360, s/v: 0-1 → {r,g,b} 0-255
+function hsvToRgbObj(h, s, v) {
+  const c = v * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = v - c;
+  let [r, g, b] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x]
+                : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  return { r: clamp255((r + m) * 255), g: clamp255((g + m) * 255), b: clamp255((b + m) * 255) };
+}
+// {r,g,b} 0-255 → { h: 0-360, s/v: 0-1 }
+function rgbObjToHsv({ r, g, b }) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = 60 * (((g - b) / d) % 6);
+    else if (max === g) h = 60 * ((b - r) / d + 2);
+    else h = 60 * ((r - g) / d + 4);
+  }
+  if (h < 0) h += 360;
+  return { h, s: max === 0 ? 0 : d / max, v: max };
+}
+
 function deriveCustomPalette(bg, text) {
   const isDark = hexLuminance(bg) < 0.4;
   const shadowA = isDark ? 0.4 : 0.1;
@@ -3723,6 +3755,7 @@ function openToc() {
 
   tocSidebar.classList.add('open');
   settingsPanel.classList.remove('open');
+  closeColorPicker();
   panelBackdrop.classList.add('visible');
   if (prefs.autoHideHeader) forceHideAutoHeader();
   // Fallback recenter after slide-in in case TOC updates while opening.
@@ -3745,6 +3778,7 @@ function openSettings() {
   settingsPanel.classList.add('open');
   tocSidebar.classList.remove('open');
   bookmarksSidebar.classList.remove('open');
+  closeColorPicker();
   panelBackdrop.classList.add('visible');
   if (prefs.autoHideHeader) forceHideAutoHeader();
   activateSettingsTab(localStorage.getItem('settingsTab') || 'theme');
@@ -3754,6 +3788,7 @@ function openBookmarks() {
   bookmarksSidebar.classList.add('open');
   tocSidebar.classList.remove('open');
   settingsPanel.classList.remove('open');
+  closeColorPicker();
   panelBackdrop.classList.add('visible');
   if (prefs.autoHideHeader) forceHideAutoHeader();
 }
@@ -3798,6 +3833,7 @@ function closePanels() {
   searchSidebar.classList.remove('open');
   bookmarksSidebar.classList.remove('open');
   document.getElementById('annotations-sidebar')?.classList.remove('open');
+  closeColorPicker();
   panelBackdrop.classList.remove('visible');
   closeJumpPanel();
   if (searchHadFocus && typeof activeEl.blur === 'function') activeEl.blur();
@@ -3917,6 +3953,7 @@ function openSearch() {
   searchSidebar.classList.add('open');
   tocSidebar.classList.remove('open');
   settingsPanel.classList.remove('open');
+  closeColorPicker();
   panelBackdrop.classList.add('visible');
   if (prefs.autoHideHeader) forceHideAutoHeader();
   // Snapshot safe-area vars before focusing opens the on-screen keyboard.
@@ -4555,10 +4592,10 @@ function syncSettingsUi() {
     b.classList.toggle('active', b.dataset.theme === prefs.theme));
   const customPickersEl = document.getElementById('custom-color-pickers');
   if (customPickersEl) customPickersEl.style.display = prefs.theme === 'custom' ? '' : 'none';
-  const customBgEl   = document.getElementById('custom-bg-color');
-  const customTextEl = document.getElementById('custom-text-color');
-  if (customBgEl)   customBgEl.value   = prefs.customBg   || '#000000';
-  if (customTextEl) customTextEl.value = prefs.customText || '#c8b89a';
+  const customBgSwatch   = document.getElementById('custom-bg-color-swatch');
+  const customTextSwatch = document.getElementById('custom-text-color-swatch');
+  if (customBgSwatch)   customBgSwatch.style.background   = prefs.customBg   || '#000000';
+  if (customTextSwatch) customTextSwatch.style.background = prefs.customText || '#c8b89a';
   document.querySelectorAll('.spread-btn[data-spread]').forEach(b =>
     b.classList.toggle('active', b.dataset.spread === prefs.spread));
   document.querySelectorAll('.page-anim-btn').forEach(b =>
@@ -5012,9 +5049,148 @@ function initSliderButtons() {
   });
 }
 
+// ── Custom color picker (SV square + hue slider + hex/RGB inputs) ──────────────
+// Docked in the same slot/width as #settings-panel (see reader.css) instead of a
+// centered modal, and shares its #panel-backdrop rather than a modal-backdrop of its
+// own — so it automatically inherits "remove book blur when settings are open" (and
+// e-ink's always-no-blur), which is the whole point of opening this from settings: the
+// book should keep updating live, visibly, while a color is being picked.
+// Replaces native <input type="color"> everywhere: Android's system picker starts at
+// HSV(0,0,0) instead of the current colour (a known WebView quirk, confirmed via a real
+// user report) and has no hex/RGB text entry at all, unlike desktop Chrome's built-in
+// one — this makes custom-theme color editing identical, and correct, on every platform
+// instead of depending on whatever the OS/browser happens to ship.
+// The panel markup is static (reader.html) and reused across opens — unlike the old
+// modal-backdrop version, which built/discarded fresh DOM each time — so all wiring
+// happens once via initColorPickerPanel(); _cpSession (null when closed) is what makes
+// the shared listeners live or inert.
+let _cpSession = null; // { h, s, v, startHex, onChange } while the panel is open
+
+function _cpEls() {
+  return {
+    panel:     document.getElementById('color-picker-panel'),
+    title:     document.getElementById('cp-title'),
+    svSquare:  document.getElementById('cp-sv-square'),
+    svThumb:   document.getElementById('cp-sv-thumb'),
+    hueSlider: document.getElementById('cp-hue-slider'),
+    hueThumb:  document.getElementById('cp-hue-thumb'),
+    preview:   document.getElementById('cp-preview'),
+    hexInput:  document.getElementById('cp-hex-input'),
+    rInput:    document.getElementById('cp-r-input'),
+    gInput:    document.getElementById('cp-g-input'),
+    bInput:    document.getElementById('cp-b-input'),
+  };
+}
+
+// h/s/v (in _cpSession) is the single source of truth while dragging the square/hue
+// slider. `sourceEl` (the field the user is actively typing in, if any) is left alone
+// so a half-typed hex like "#1a2" isn't reformatted out from under the caret.
+function _cpRender(sourceEl) {
+  if (!_cpSession) return;
+  const els = _cpEls();
+  const { h, s, v } = _cpSession;
+  const rgb = hsvToRgbObj(h, s, v);
+  const hex = rgbObjToHex(rgb);
+  els.svSquare.style.backgroundColor = `hsl(${h},100%,50%)`;
+  els.svThumb.style.left = (s * 100) + '%';
+  els.svThumb.style.top  = ((1 - v) * 100) + '%';
+  els.hueThumb.style.left = (h / 360 * 100) + '%';
+  els.preview.style.background = hex;
+  if (sourceEl !== els.hexInput) els.hexInput.value = hex;
+  if (sourceEl !== els.rInput) els.rInput.value = rgb.r;
+  if (sourceEl !== els.gInput) els.gInput.value = rgb.g;
+  if (sourceEl !== els.bInput) els.bInput.value = rgb.b;
+  [els.hexInput, els.rInput, els.gInput, els.bInput].forEach(el => el.classList.remove('cp-invalid'));
+  _cpSession.onChange(hex);
+}
+
+function _cpSetFromPointer(el, clientX, clientY, isHue) {
+  if (!_cpSession) return;
+  const rect = el.getBoundingClientRect();
+  const x = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  if (isHue) {
+    _cpSession.h = x * 360;
+  } else {
+    const y = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+    _cpSession.s = x; _cpSession.v = 1 - y;
+  }
+  _cpRender();
+}
+
+// Closes without reverting — the last live-previewed color stays applied, same as the
+// old native <input type="color"> (which had no cancel concept at all). Used both by
+// "Confirm" and by every other panel-opening path (openToc/openSettings/etc. and
+// closePanels()) that implicitly dismisses whatever else was open. Explicit Cancel/✕
+// revert first (see initColorPickerPanel) and then call this.
+function closeColorPicker() {
+  document.getElementById('color-picker-panel')?.classList.remove('open');
+  _cpSession = null;
+}
+
+function openColorPicker(initialHex, title, onChange) {
+  const els = _cpEls();
+  if (!els.panel) return;
+  const startHex = rgbObjToHex(hexToRgbObj(initialHex) || { r: 0, g: 0, b: 0 });
+  _cpSession = { ...rgbObjToHsv(hexToRgbObj(startHex)), startHex, onChange };
+  els.title.textContent = title;
+  panelBackdrop.classList.add('visible');
+  els.panel.classList.add('open');
+  _cpRender();
+}
+
+// Wired once — the static panel markup (reader.html) is reused across every open, so
+// listeners must not be re-attached per call. Call from initSettingsUi().
+function initColorPickerPanel() {
+  const els = _cpEls();
+  if (!els.panel) return;
+
+  function wireDrag(el, isHue) {
+    let dragging = false;
+    el.addEventListener('pointerdown', e => {
+      if (!_cpSession) return;
+      dragging = true;
+      el.setPointerCapture(e.pointerId);
+      _cpSetFromPointer(el, e.clientX, e.clientY, isHue);
+    });
+    el.addEventListener('pointermove', e => { if (dragging) _cpSetFromPointer(el, e.clientX, e.clientY, isHue); });
+    el.addEventListener('pointerup',     () => { dragging = false; });
+    el.addEventListener('pointercancel', () => { dragging = false; });
+  }
+  wireDrag(els.svSquare, false);
+  wireDrag(els.hueSlider, true);
+
+  els.hexInput.addEventListener('input', () => {
+    if (!_cpSession) return;
+    const rgb = hexToRgbObj(els.hexInput.value);
+    if (!rgb) { els.hexInput.classList.add('cp-invalid'); return; }
+    Object.assign(_cpSession, rgbObjToHsv(rgb));
+    _cpRender(els.hexInput);
+  });
+  [[els.rInput, 'r'], [els.gInput, 'g'], [els.bInput, 'b']].forEach(([el, key]) => {
+    el.addEventListener('input', () => {
+      if (!_cpSession) return;
+      const n = parseInt(el.value, 10);
+      if (!Number.isFinite(n) || n < 0 || n > 255) { el.classList.add('cp-invalid'); return; }
+      const rgb = hsvToRgbObj(_cpSession.h, _cpSession.s, _cpSession.v);
+      rgb[key] = n;
+      Object.assign(_cpSession, rgbObjToHsv(rgb));
+      _cpRender(el);
+    });
+  });
+
+  const revertAndClose = () => {
+    if (_cpSession) _cpSession.onChange(_cpSession.startHex);
+    closeColorPicker();
+  };
+  document.getElementById('cp-cancel')?.addEventListener('click', revertAndClose);
+  document.getElementById('cp-close')?.addEventListener('click', revertAndClose);
+  document.getElementById('cp-done')?.addEventListener('click', closeColorPicker);
+}
+
 function initSettingsUi() {
   populateFontSelect();
   populateSbFontSelect();
+  initColorPickerPanel();
 
   document.getElementById('btn-reset-book-prefs')?.addEventListener('click', () => {
     if (!currentBook?.id) return;
@@ -5335,13 +5511,21 @@ function initSettingsUi() {
       applyUiTheme(); reapplyStyles(); syncSettingsUi(); persistPrefs();
     });
   });
-  document.getElementById('custom-bg-color')?.addEventListener('input', e => {
-    prefs.customBg = e.target.value;
-    applyUiTheme(); reapplyStyles(); persistPrefs();
+  document.getElementById('custom-bg-color-btn')?.addEventListener('click', () => {
+    const swatch = document.getElementById('custom-bg-color-swatch');
+    openColorPicker(prefs.customBg || '#000000', t('reader.custom_bg'), hex => {
+      prefs.customBg = hex;
+      if (swatch) swatch.style.background = hex;
+      applyUiTheme(); reapplyStyles(); persistPrefs();
+    });
   });
-  document.getElementById('custom-text-color')?.addEventListener('input', e => {
-    prefs.customText = e.target.value;
-    applyUiTheme(); reapplyStyles(); persistPrefs();
+  document.getElementById('custom-text-color-btn')?.addEventListener('click', () => {
+    const swatch = document.getElementById('custom-text-color-swatch');
+    openColorPicker(prefs.customText || '#c8b89a', t('reader.custom_text'), hex => {
+      prefs.customText = hex;
+      if (swatch) swatch.style.background = hex;
+      applyUiTheme(); reapplyStyles(); persistPrefs();
+    });
   });
   document.querySelectorAll('.spread-btn[data-spread]').forEach(btn => {
     btn.addEventListener('click', async () => {

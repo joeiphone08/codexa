@@ -464,14 +464,14 @@
         <div class="setting-row" id="custom-color-pickers" style="display:none">
           <div class="setting-label" data-i18n="reader.custom_colors">Custom colors</div>
           <div class="custom-color-pickers">
-            <label class="custom-color-picker">
+            <button type="button" class="custom-color-picker" id="custom-bg-color-btn">
               <span data-i18n="reader.custom_bg">Background</span>
-              <input type="color" id="custom-bg-color" value="#000000" />
-            </label>
-            <label class="custom-color-picker">
+              <span class="color-swatch" id="custom-bg-color-swatch" style="background:#000000"></span>
+            </button>
+            <button type="button" class="custom-color-picker" id="custom-text-color-btn">
               <span data-i18n="reader.custom_text">Text</span>
-              <input type="color" id="custom-text-color" value="#c8b89a" />
-            </label>
+              <span class="color-swatch" id="custom-text-color-swatch" style="background:#c8b89a"></span>
+            </button>
           </div>
         </div>
 
@@ -1270,6 +1270,37 @@
     </div>
   </div>
 
+  <!-- Custom color picker — docked in the same slot/width as #settings-panel (reader.css)
+       rather than a centered modal, so it reads as "drilling into" settings and shares its
+       #panel-backdrop (inheriting the "remove book blur when settings are open" preference). -->
+  <div id="color-picker-panel" role="dialog" aria-modal="true" aria-label="Barva po meri">
+    <div class="settings-panel-header">
+      <div class="settings-panel-header-row">
+        <div class="panel-title"><h2 id="cp-title"></h2></div>
+        <button id="cp-close" class="modal-close" data-i18n-aria-label="common.close" aria-label="Zapri">×</button>
+      </div>
+    </div>
+    <div class="settings-body">
+      <div class="cp-sv-square" id="cp-sv-square"><div class="cp-sv-thumb" id="cp-sv-thumb"></div></div>
+      <div class="cp-hue-slider" id="cp-hue-slider"><div class="cp-hue-thumb" id="cp-hue-thumb"></div></div>
+      <div class="cp-fields">
+        <div class="cp-preview" id="cp-preview"></div>
+        <label class="cp-hex-field"><span>HEX</span>
+          <input type="text" id="cp-hex-input" maxlength="7" autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="cp-rgb-row">
+          <label class="cp-rgb-field"><span>R</span><input type="number" id="cp-r-input" min="0" max="255" /></label>
+          <label class="cp-rgb-field"><span>G</span><input type="number" id="cp-g-input" min="0" max="255" /></label>
+          <label class="cp-rgb-field"><span>B</span><input type="number" id="cp-b-input" min="0" max="255" /></label>
+        </div>
+      </div>
+    </div>
+    <div class="cp-panel-footer">
+      <button class="btn btn-secondary" id="cp-cancel" data-i18n="common.cancel">Prekliči</button>
+      <button class="btn btn-primary" id="cp-done" data-i18n="common.confirm">Potrdi</button>
+    </div>
+  </div>
+
   <!-- Backdrop -->
   <div id="panel-backdrop"></div>
 
@@ -1302,7 +1333,7 @@
        cross-origin requests are deliberately left uncached by sw.js, and third-party CDN
        resources aren't reliably available offline in iOS home-screen PWAs. -->
   <script src="/js/vendor/jszip.min.js"></script>
-  <script type="module" src="/js/reader.js?v=br-v126"></script>
+  <script type="module" src="/js/reader.js?v=br-v128"></script>
   <script src="/js/sw-register.js"></script>
 </body>
 </html>

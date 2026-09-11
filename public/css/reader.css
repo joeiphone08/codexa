@@ -749,6 +749,7 @@ html, body {
 #search-sidebar,
 #bookmarks-sidebar,
 #settings-panel,
+#color-picker-panel,
 .sleep-timer-panel,
 .dict-popup {
   box-shadow: none;
@@ -760,7 +761,8 @@ html, body {
 body.page-gap-shadow-on #toc-sidebar,
 body.page-gap-shadow-on #search-sidebar,
 body.page-gap-shadow-on #bookmarks-sidebar,
-body.page-gap-shadow-on #settings-panel {
+body.page-gap-shadow-on #settings-panel,
+body.page-gap-shadow-on #color-picker-panel {
   box-shadow: var(--shadow);
 }
 
@@ -772,6 +774,7 @@ body.page-gap-shadow-on #settings-panel {
 #search-sidebar.open,
 #bookmarks-sidebar.open,
 #settings-panel.open,
+#color-picker-panel.open,
 .sleep-timer-panel.open,
 .dict-popup.open {
   box-shadow: var(--shadow);
@@ -912,12 +915,16 @@ body.page-gap-shadow-on #settings-panel {
 
 /* "Remove book blur when settings are open" (prefs.settingsNoBlur): keep the backdrop present
    (it still captures the tap-to-close), but drop the dim + blur so the book stays legible for a
-   live font/margin/line-spacing preview. Scoped to the settings panel only — TOC, search,
-   bookmarks and annotations still dim as before. E-ink mode always gets this behaviour
-   regardless of the toggle (a flat 55% overlay just muddies an e-ink screen, and blur is a
-   no-op there anyway) — the toggle itself is disabled in that mode, see syncSettingsUi(). */
+   live font/margin/line-spacing/color preview. Scoped to the settings panel and the color
+   picker it can open (which is always opened from inside settings, so this is somewhat
+   belt-and-suspenders, but it's cheap and keeps the two decoupled) — TOC, search, bookmarks
+   and annotations still dim as before. E-ink mode always gets this behaviour regardless of the
+   toggle (a flat 55% overlay just muddies an e-ink screen, and blur is a no-op there anyway) —
+   the toggle itself is disabled in that mode, see syncSettingsUi(). */
 body.settings-no-blur #settings-panel.open ~ #panel-backdrop,
-[data-reader-eink] #settings-panel.open ~ #panel-backdrop {
+body.settings-no-blur #color-picker-panel.open ~ #panel-backdrop,
+[data-reader-eink] #settings-panel.open ~ #panel-backdrop,
+[data-reader-eink] #color-picker-panel.open ~ #panel-backdrop {
   background: transparent;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -1256,6 +1263,34 @@ body.settings-no-blur #settings-panel.open ~ #panel-backdrop,
   flex-direction: column;
 }
 #settings-panel.open { transform: translateX(0); }
+
+/* Same slot/width/z-index-adjacent as #settings-panel: it visually "replaces" settings while
+   open (one higher z-index) rather than stacking beside it, reading as drilling one level in —
+   settings-panel is left untouched underneath and reappears as soon as this closes. */
+#color-picker-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--layout-h, 100%);
+  width: min(320px, 94vw);
+  background: var(--color-surface);
+  border-left: 1px solid var(--color-border);
+  z-index: 301;
+  transform: translateX(100%);
+  transition: transform .25s ease;
+  display: flex;
+  flex-direction: column;
+}
+#color-picker-panel.open { transform: translateX(0); }
+.cp-panel-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: .75rem;
+  padding: 1rem 1.25rem calc(1rem + var(--sab, 0px));
+  border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
 .settings-panel-header {
   display: flex;
   flex-direction: column;
@@ -1651,16 +1686,114 @@ html.no-flexgap .spread-buttons.page-anim-grid > * + * { margin-left: 0; }
   font-size: .8rem;
   color: var(--color-text);
   cursor: pointer;
+  font-family: inherit;
+  text-align: left;
 }
-.custom-color-picker input[type="color"] {
+.custom-color-picker .color-swatch {
   width: 2rem;
   height: 1.6rem;
   border: 1px solid var(--color-border);
   border-radius: 4px;
-  cursor: pointer;
-  padding: 1px 2px;
-  background: none;
   flex-shrink: 0;
+  /* Checkerboard behind the swatch itself isn't needed — colors here are always opaque —
+     but a thin inset ring keeps very dark/black swatches visible against a dark theme. */
+  box-shadow: inset 0 0 0 1px rgba(127,127,127,.25);
+}
+
+/* ── Custom color picker panel contents ─────────────────────────────────────────
+   Own SV square + hue slider + hex/RGB inputs, replacing native <input type="color">
+   on every platform: Android's system picker opens at HSV(0,0,0) instead of the
+   current value and has no hex/RGB entry at all, so desktop and mobile used to give a
+   genuinely different (and on Android, broken) experience for the same setting.
+   (#color-picker-panel itself — the docked panel shell — is styled up near
+   #settings-panel, since it deliberately shares that positioning.) */
+.cp-sv-square {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1.6 / 1;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+  /* Standard CSS-only saturation/value picker: layer a value (black, bottom-up) and a
+     saturation (white, left-to-right) gradient over the flat hue color that JS sets via
+     background-color (see _cpRender in reader.js) — no canvas needed. */
+  background-image:
+    linear-gradient(to top, #000, rgba(0,0,0,0)),
+    linear-gradient(to right, #fff, rgba(255,255,255,0));
+}
+.cp-sv-thumb {
+  position: absolute;
+  width: 16px; height: 16px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.5), 0 1px 3px rgba(0,0,0,.4);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.cp-hue-slider {
+  position: relative;
+  width: 100%;
+  height: 14px;
+  margin-top: .85rem;
+  border-radius: 7px;
+  border: 1px solid var(--color-border);
+  background: linear-gradient(to right,
+    hsl(0,100%,50%), hsl(60,100%,50%), hsl(120,100%,50%),
+    hsl(180,100%,50%), hsl(240,100%,50%), hsl(300,100%,50%), hsl(360,100%,50%));
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+}
+.cp-hue-thumb {
+  position: absolute;
+  top: 50%;
+  width: 18px; height: 18px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.5), 0 1px 3px rgba(0,0,0,.4);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.cp-fields {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  margin-top: 1.1rem;
+}
+.cp-preview {
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  box-shadow: inset 0 0 0 1px rgba(127,127,127,.25);
+  flex-shrink: 0;
+}
+.cp-hex-field { display: flex; flex-direction: column; gap: .25rem; }
+.cp-hex-field span, .cp-rgb-field span {
+  font-size: .68rem;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: .03em;
+}
+.cp-hex-field input {
+  width: 6.5em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-transform: uppercase;
+}
+.cp-rgb-row { display: flex; gap: .4rem; }
+.cp-rgb-field input { width: 3.2em; text-align: center; }
+.cp-hex-field input, .cp-rgb-field input {
+  padding: .35rem .4rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface2);
+  color: var(--color-text);
+  font-size: .85rem;
+}
+.cp-hex-field input.cp-invalid, .cp-rgb-field input.cp-invalid {
+  border-color: var(--color-danger, #e5484d);
 }
 
 /* E-ink reader: spread button high-contrast */
