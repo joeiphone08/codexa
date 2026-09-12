@@ -8,7 +8,7 @@ import { stripImageWhiteBackgrounds } from './img-bg-fix.js';
 import { createComicViewer } from './comic-viewer.js';
 import { renderPdfCoverBlob, uploadPdfCover } from './pdf-cover.js';
 
-const READER_BUILD = 'br-v105-kosync-chapter-first';
+const READER_BUILD = 'br-v106-kosync-spine-nav';
 const _i18nReady = initI18n();
 log('[codexa] reader build', READER_BUILD);
 
@@ -1058,6 +1058,28 @@ function compareChapterPositions(remoteIdx, remotePct, localIdx, localPct, toler
 // on hand (a live KOSync response), unlike the push-side guards above.
 function compareKosyncPosition(remotePct, remoteXPointer, localPct, localSpineIdx, tolerance) {
   return compareChapterPositions(spineIndexFromXPointer(remoteXPointer), remotePct, localSpineIdx, localPct, tolerance);
+}
+
+// Navigates to a synced position, preferring the xpointer's chapter over percentage whenever
+// it resolves. goToPct()/seekToPercent() walk CODEXA'S OWN content-weighted percentage scale —
+// confirmed live (a real KOReader device) that this can land on a *different* chapter than the
+// one its own xpointer actually named, i.e. detection can correctly say "remote is ahead" and
+// the jump still ends up somewhere else. goToSpineItem() sidesteps the cross-engine percentage
+// mismatch entirely by going straight to the chapter the xpointer names — the same call the
+// search feature already uses for exact-location jumps, so it's a well-exercised path, not new
+// surface area. Lands on page 1 of that chapter (no percentage refinement within it, same
+// cross-engine reasoning); falls back to the previous percentage-only behaviour when the
+// remote has no parseable xpointer at all (e.g. some KOSync-compatible servers report
+// percentage only).
+async function navigateToSyncedPosition(percentage, xpointer) {
+  if (!_cxReader) return;
+  const spineIdx = spineIndexFromXPointer(xpointer);
+  if (spineIdx != null) {
+    await _cxReader.goToSpineItem(spineIdx);
+  } else if (percentage != null) {
+    await _cxReader.goToPct(percentage);
+    _cxReader.seekToPercent(percentage);
+  }
 }
 
 function bionicFocusLength(len) {
@@ -6139,11 +6161,8 @@ async function networkRestoreSync() {
 
     log('[kosync] networkRestoreSync: auto-pulling remote position', Math.round(remotePct * 100) + '%');
     if (best.progress && best.progress.startsWith('/body/DocFragment[')) lastKnownXPointer = best.progress;
-    if (_cxReader) {
-      await _cxReader.goToPct(remotePct);
-      _cxReader.seekToPercent(remotePct);
-      currentCfi = _cxReader.makeCfi();
-    }
+    await navigateToSyncedPosition(remotePct, best.progress);
+    if (_cxReader) currentCfi = _cxReader.makeCfi();
     currentPct = remotePct;
     lastSyncedCfi = currentCfi;
     toast.success(t('reader.kosync_auto_pull_done', { pct: Math.round(remotePct * 100) }));
@@ -8097,16 +8116,24 @@ document.getElementById('kosync-zone-bl')?.addEventListener('click', async () =>
   const int = intResult.status === 'fulfilled' ? intResult.value : null;
   const ownRaw = ownResult.status === 'fulfilled' ? ownResult.value : null;
   const bo  = boResult.status  === 'fulfilled' ? boResult.value  : null;
-  // Reshaped to the same { percentage, progress, timestamp, device } shape as ext/int so
-  // it can be compared alongside them; it has no KOReader xpointer, only a plain percentage.
-  const own = (ownRaw && typeof ownRaw.percentage === 'number')
+  // own only exists to cover a stale *live session* (e.g. resumed from a backgrounded WebView
+  // that never refetched) — it's Codexa's own last-saved position, not an independent remote
+  // signal. Letting it compete for "best" purely on timestamp meant it routinely outranked a
+  // genuinely newer e-reader push (confirmed live: it's re-saved on every debounced/periodic
+  // save, so its timestamp is almost always the newest the instant anyone is actively reading)
+  // and, being ~equal to currentPct by construction, made the pull silently report "same
+  // position" instead of ever showing the real answer. So it only counts at all when its own
+  // CFI chapter is genuinely ahead of the live session's — otherwise it has nothing to add.
+  const ownSpineIdx = spineIndexFromCfi(ownRaw?.cfi_position);
+  const own = (ownRaw && typeof ownRaw.percentage === 'number'
+               && compareChapterPositions(ownSpineIdx, ownRaw.percentage, currentSpineIndex, currentPct, 0.01) > 0)
     ? { percentage: ownRaw.percentage, progress: null, timestamp: ownRaw.updated_at || 0, device: ownRaw.device || 'web' }
     : null;
 
   // Pick the freshest usable source. A source is usable if it has a numeric percentage —
   // .progress (KOReader xpointer) is only an optional precision refinement, never required
-  // to jump (see the percentage-only navigation below). Checked ext → int → own → bo so each
-  // only wins ties against an earlier one if strictly newer, matching the existing tie-break.
+  // to jump (see navigateToSyncedPosition). Checked ext → int → own → bo so each only wins
+  // ties against an earlier one if strictly newer, matching the existing tie-break.
   const hasPosition = r => r && typeof r.percentage === 'number';
   let best = null;
   if (hasPosition(ext)) best = ext;
@@ -8127,10 +8154,7 @@ document.getElementById('kosync-zone-bl')?.addEventListener('click', async () =>
   const doSync = await showSyncDialog(best, currentPct, null);
   if (!doSync) return;
 
-  if (_cxReader && best.percentage != null) {
-    await _cxReader.goToPct(best.percentage);
-    _cxReader.seekToPercent(best.percentage);
-  }
+  await navigateToSyncedPosition(best.percentage, best.progress);
 });
 
 document.getElementById('kosync-zone-br')?.addEventListener('click', async () => {
@@ -8853,13 +8877,10 @@ async function init() {
     // which is why the CFI correction loop below runs after this call.
     const syncTarget = (prefs.skipOpenProgressCheck || skipOpenSync || isPeekMode) ? null : await syncOnOpen(localProgress);
     if (syncTarget?.percentage != null) {
-      if (_cxReader) {
-        // CXReader: navigate by percentage — most reliable since DocFragment data can be
-        // stale/mismatched from earlier sessions. Percentage scales linearly over spine count.
-        await _cxReader.goToPct(syncTarget.percentage);
-        // goToPct only resolves to chapter level (page 1); fine-tune to the exact page.
-        _cxReader.seekToPercent(syncTarget.percentage);
-      }
+      // See navigateToSyncedPosition's own comment: percentage alone is NOT reliable across
+      // engines (confirmed live) — navigate by the xpointer's chapter when it resolves, only
+      // falling back to percentage when it doesn't.
+      await navigateToSyncedPosition(syncTarget.percentage, syncTarget.progress);
     } else if (_cxReader && localProgress?.percentage > 0 && !isPeekMode) {
       // CXReader, no sync jump: restore exact page first; fall back to % if out of range.
       // Skip in peek mode: peek never saves position.
