@@ -8,7 +8,7 @@ import { stripImageWhiteBackgrounds } from './img-bg-fix.js';
 import { createComicViewer } from './comic-viewer.js';
 import { renderPdfCoverBlob, uploadPdfCover } from './pdf-cover.js';
 
-const READER_BUILD = 'br-v104-progbar-live-refresh';
+const READER_BUILD = 'br-v105-kosync-chapter-first';
 const _i18nReady = initI18n();
 log('[codexa] reader build', READER_BUILD);
 
@@ -459,6 +459,11 @@ let syncDebounceTimer  = null;
 let syncIntervalTimer  = null;
 let lastSyncedCfi      = '';           // CFI at last successful remote push — used to skip duplicate syncs
 let bestKnownRemotePct = 0;            // high-water mark from all sources — kosync is never pushed below this
+// Spine index the above high-water mark was derived from, when known — kept in lockstep with
+// bestKnownRemotePct everywhere it's updated, so the backwards-push guard can compare chapters
+// first (see compareKosyncPosition) instead of trusting cross-engine percentages alone. null
+// whenever the source of the current bestKnownRemotePct had no parseable xpointer/CFI.
+let bestKnownRemoteSpineIdx = null;
 let _kosyncPushFailures    = 0;        // consecutive remote push failures for current book
 let _kosyncWarnedThisSession = false;  // only warn once per book load
 let _bookorbitWarnedThisSession = false; // only warn once per book load (automatic pushes)
@@ -1015,6 +1020,44 @@ function spineIndexFromCfi(cfi) {
   if (!Number.isFinite(n)) return null;
   const idx = Math.floor(n / 2) - 1;
   return idx >= 0 ? idx : null;
+}
+
+// Parses a KOReader-style xpointer's leading /body/DocFragment[N] into Codexa's own 0-based
+// spine index — the exact inverse of koReaderXPointer()'s own N = currentSpineIndex + 1
+// generation (see that function). Returns null when the string isn't in that shape.
+function spineIndexFromXPointer(xpointer) {
+  const m = /^\/body\/DocFragment\[(\d+)\]/.exec(String(xpointer || ''));
+  return m ? parseInt(m[1], 10) - 1 : null;
+}
+
+// Compares a remote position against a local one, preferring chapter (spine index) over raw
+// percentage whenever both sides resolve to one. Percentage alone is unreliable across a
+// chapter boundary in a book with many short chapters — different KOReader-family engines
+// (crengine, Codexa's own byte-weighted one) don't measure "percent through the book" the
+// same way, so a whole chapter of real progress can be smaller than this comparison's own
+// tolerance (confirmed via a real report: a 152-chapter book where being one chapter ahead
+// was under 1%, well inside the existing "same position" threshold — Codexa then read that
+// gap as "no difference" and, worse, went on to push its own older position over the
+// genuinely newer remote one). A strictly later chapter is trusted as forward progress
+// regardless of what the percentages say; the finer, less reliable percentage comparison only
+// kicks in once both sides already agree on the chapter (or neither has a known spine index).
+// Returns 1 if remote is ahead, -1 if remote is behind, 0 if they're the same position.
+// Takes spine indices directly (nullable) — used as-is by the push-side high-water-mark
+// guards, which already track both sides as plain spine indices (see bestKnownRemoteSpineIdx).
+function compareChapterPositions(remoteIdx, remotePct, localIdx, localPct, tolerance) {
+  if (remoteIdx != null && typeof localIdx === 'number' && remoteIdx !== localIdx) {
+    return remoteIdx > localIdx ? 1 : -1;
+  }
+  const diff = (remotePct || 0) - (localPct || 0);
+  if (Math.abs(diff) <= tolerance) return 0;
+  return diff > 0 ? 1 : -1;
+}
+
+// Same as compareChapterPositions(), but takes the remote's raw KOSync xpointer string
+// instead of an already-parsed spine index — the shape every pull/restore path actually has
+// on hand (a live KOSync response), unlike the push-side guards above.
+function compareKosyncPosition(remotePct, remoteXPointer, localPct, localSpineIdx, tolerance) {
+  return compareChapterPositions(spineIndexFromXPointer(remoteXPointer), remotePct, localSpineIdx, localPct, tolerance);
 }
 
 function bionicFocusLength(len) {
@@ -5825,8 +5868,11 @@ async function saveProgress({ forceRemote = false, allowRemote = true, inSession
   const alreadySynced = !forced && cfi !== '' && cfi === lastSyncedCfi;
   const shouldPushRemote = !alreadySynced && pct > 0 && (inSession || !prefs.skipSaveOnClose) && (forceRemote || (allowRemote && posChanged));
   // Never push to cross-device kosync if it would overwrite a higher known position.
-  // `forced` (manual sync with user confirmation) is allowed to push backwards.
-  const wouldGoBackwards = !forced && pct < bestKnownRemotePct - 0.005;
+  // `forced` (manual sync with user confirmation) is allowed to push backwards. Chapter-first
+  // (see compareChapterPositions): a plain percentage comparison here is what let Codexa push
+  // an older chapter over a genuinely newer one from another device in the reported bug —
+  // their percentage scales didn't agree closely enough for the raw pct gap to look real.
+  const wouldGoBackwards = !forced && compareChapterPositions(bestKnownRemoteSpineIdx, bestKnownRemotePct, currentSpineIndex, pct, 0.005) > 0;
   const shouldPushKosync = shouldPushRemote && !wouldGoBackwards;
   if (wouldGoBackwards && shouldPushRemote) {
     log('[kosync] saveProgress: skipping kosync push — would go backwards:', Math.round(pct * 100) + '% < known best ' + Math.round(bestKnownRemotePct * 100) + '%');
@@ -5861,6 +5907,7 @@ async function saveProgress({ forceRemote = false, allowRemote = true, inSession
   if (shouldPushKosync) {
     lastSyncedCfi = cfi; // record what we just synced
     bestKnownRemotePct = pct; // update high-water mark (may go down if user confirmed backwards)
+    bestKnownRemoteSpineIdx = currentSpineIndex; // this push is our own live position — always exact
     checkBookorbitStatus();
   }
 }
@@ -5897,10 +5944,13 @@ function saveProgressBackground({ inSession = false } = {}) {
   }
   // Push to KOSync on close whenever position moved (chapter changed OR within-chapter pct changed).
   // Periodic/debounced saves intentionally skip KOSync; close is the designated sync point.
-  if (pct > 0 && !prefs.skipSaveOnClose && (posChanged || pctChanged) && pct >= bestKnownRemotePct - 0.005) {
+  // Chapter-first guard — see compareChapterPositions's own comment for why raw percentage
+  // alone isn't reliable enough to gate this on.
+  if (pct > 0 && !prefs.skipSaveOnClose && (posChanged || pctChanged) &&
+      compareChapterPositions(bestKnownRemoteSpineIdx, bestKnownRemotePct, currentSpineIndex, pct, 0.005) <= 0) {
     fetch(`/api/kosync/remote/${encodeURIComponent(docKey)}`,   opts({ document: docKey, progress: xp, percentage: pct, device: 'Codexa', device_id: 'codexa-web' })).catch(() => {});
     fetch(`/api/kosync/internal/${encodeURIComponent(docKey)}`, opts({ progress: xp, percentage: pct, device: 'Codexa', device_id: 'codexa-web' })).catch(() => {});
-    if (pct > bestKnownRemotePct) bestKnownRemotePct = pct;
+    if (pct > bestKnownRemotePct) { bestKnownRemotePct = pct; bestKnownRemoteSpineIdx = currentSpineIndex; }
   }
 }
 
@@ -5998,10 +6048,15 @@ async function syncOnOpen(localProgress) {
   const bestTime  = best.timestamp             || 0;
   log('[kosync] best:', best.device, Math.round((best.percentage||0)*100)+'%', 'ts:', bestTime, 'localTime:', localTime);
 
-  // Always advance the high-water mark; ensures we never push backwards later
+  // Always advance the high-water mark; ensures we never push backwards later. Paired spine
+  // index follows whichever side (local vs remote) actually won the max() below — see
+  // bestKnownRemoteSpineIdx's own comment.
   const remoteHighWater = Math.max(localPct, best.percentage || 0);
   if (remoteHighWater > bestKnownRemotePct) {
     bestKnownRemotePct = remoteHighWater;
+    bestKnownRemoteSpineIdx = (best.percentage || 0) >= localPct
+      ? spineIndexFromXPointer(best.progress)
+      : currentSpineIndex;
     log('[kosync] bestKnownRemotePct →', Math.round(bestKnownRemotePct * 100) + '%');
   }
 
@@ -6017,19 +6072,22 @@ async function syncOnOpen(localProgress) {
   const xpointerMatch = !!(localXPointer && best.progress && localXPointer === best.progress);
   log('[kosync] xpointerMatch:', xpointerMatch, 'local:', localXPointer, 'remote:', best.progress);
 
-  const pctDiffers = Math.abs((best.percentage || 0) - localPct) > 0.01;
+  // Chapter-first comparison (see compareKosyncPosition) — a plain percentage gap was too
+  // easily lost in the noise between engines on a book with many short chapters, which is
+  // exactly what let a real one-chapter gap read as "no difference" in a live report.
+  const cmp = compareKosyncPosition(best.percentage, best.progress, localPct, currentSpineIndex, 0.01);
   // Never silently jump backwards — only prompt when the remote is ahead.
   // If remote is behind local, it means we already synced more recently from this
   // device (e.g. the hide-beacon fired but localProgress hasn't updated yet).
-  const remoteIsAhead = (best.percentage || 0) > localPct + 0.005;
+  const remoteIsAhead = cmp > 0;
   // Exception: if the remote was saved MORE RECENTLY than our local progress (e.g.
   // user deliberately pushed KOSync backwards to re-read a chapter), honour it even
   // when it is behind.  Require >60 s gap to avoid spurious prompts from normal
-  // concurrent saves, and >0.5 % difference so trivial floating-point drift is ignored.
+  // concurrent saves, and a real position difference so trivial drift is ignored.
   const remoteIsNewerAndDiffers =
     bestTime > localTime + 60 &&
-    Math.abs((best.percentage || 0) - localPct) > 0.005;
-  if (!xpointerMatch && ((pctDiffers && remoteIsAhead) || remoteIsNewerAndDiffers)) {
+    compareKosyncPosition(best.percentage, best.progress, localPct, currentSpineIndex, 0.005) !== 0;
+  if (!xpointerMatch && (remoteIsAhead || remoteIsNewerAndDiffers)) {
     const doSync = await showSyncDialog(best, localPct, localTime);
     if (doSync) return { percentage: best.percentage, progress: best.progress };
   }
@@ -6062,9 +6120,16 @@ async function networkRestoreSync() {
     if (!hasPosition(best)) { log('[kosync] networkRestoreSync: no remote progress found'); return; }
 
     const remotePct = best.percentage || 0;
-    if (remotePct > bestKnownRemotePct) bestKnownRemotePct = remotePct;
+    if (remotePct > bestKnownRemotePct) {
+      bestKnownRemotePct = remotePct;
+      bestKnownRemoteSpineIdx = spineIndexFromXPointer(best.progress);
+    }
 
-    if (remotePct <= currentPct + 0.005) {
+    // Chapter-first (see compareKosyncPosition) — this path is fully automatic/silent, so a
+    // false "we're ahead" here (the old plain-percentage check, on a book with many short
+    // chapters) meant it never pulled a genuinely newer remote position at all, not just a
+    // wrong toast.
+    if (compareKosyncPosition(remotePct, best.progress, currentPct, currentSpineIndex, 0.005) <= 0) {
       // We're ahead or tied — nothing to pull. flushProgressOutbox (called by the trigger
       // below, before this runs) already pushed anything queued while genuinely offline;
       // the normal saveProgress high-water logic covers the rest. Equal case: no-op.
@@ -8051,7 +8116,10 @@ document.getElementById('kosync-zone-bl')?.addEventListener('click', async () =>
 
   if (!hasPosition(best)) { toast.info(t('reader.kosync_no_progress')); return; }
 
-  if (Math.abs((best.percentage || 0) - currentPct) <= 0.01) {
+  // Chapter-first (see compareKosyncPosition) — this is the exact "Already at the same
+  // position" false positive from the live report: a percentage-only comparison read a real
+  // one-chapter gap as no difference at all on a book with many short chapters.
+  if (compareKosyncPosition(best.percentage, best.progress, currentPct, currentSpineIndex, 0.01) === 0) {
     toast.info(t('reader.kosync_same_position'));
     return;
   }
@@ -8164,7 +8232,8 @@ document.getElementById('btn-sync')?.addEventListener('click', async () => {
   const btn = document.getElementById('btn-sync');
   if (!isReady || !currentBook || btn.disabled) return;
   const pct = currentPct > 0 ? currentPct : lastKnownGoodPct;
-  const isBackwards = pct > 0 && pct < bestKnownRemotePct - 0.005;
+  // Chapter-first (see compareChapterPositions) — same reasoning as saveProgress's own guard.
+  const isBackwards = pct > 0 && compareChapterPositions(bestKnownRemoteSpineIdx, bestKnownRemotePct, currentSpineIndex, pct, 0.005) > 0;
   if (isBackwards) {
     const curPctStr  = Math.round(pct * 100) + '%';
     const bestPctStr = Math.round(bestKnownRemotePct * 100) + '%';
@@ -8191,6 +8260,7 @@ document.getElementById('btn-sync')?.addEventListener('click', async () => {
     if (!ok) return;
     // User confirmed — reset the high-water mark to the current position
     bestKnownRemotePct = pct;
+    bestKnownRemoteSpineIdx = currentSpineIndex;
   }
   btn.classList.add('btn-sync-busy');
   btn.disabled = true;
@@ -8736,8 +8806,13 @@ async function init() {
       log('[reader] localProgress:', localProgress?.cfi_position?.slice(0, 60), 'pct:', localProgress?.percentage);
       if (localProgress?.percentage > 0) {
         lastKnownGoodPct = localProgress.percentage;
-        // Seed the high-water mark so we never push below what the server already has
-        if (localProgress.percentage > bestKnownRemotePct) bestKnownRemotePct = localProgress.percentage;
+        // Seed the high-water mark so we never push below what the server already has.
+        // cfi_position here is always Codexa's own CFI (this is our own DB row), so the
+        // paired spine index is exact, not a cross-engine guess.
+        if (localProgress.percentage > bestKnownRemotePct) {
+          bestKnownRemotePct = localProgress.percentage;
+          bestKnownRemoteSpineIdx = spineIndexFromCfi(localProgress.cfi_position);
+        }
         // Keep the offline metadata in sync so "Currently Reading" is correct offline
         if (!_legacyWebView) getBookMeta(Number(bookId)).then(meta => {
           if (meta) saveBookMeta({ ...meta, percentage: localProgress.percentage }).catch(() => {});
