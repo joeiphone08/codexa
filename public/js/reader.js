@@ -8,7 +8,7 @@ import { stripImageWhiteBackgrounds } from './img-bg-fix.js';
 import { createComicViewer } from './comic-viewer.js';
 import { renderPdfCoverBlob, uploadPdfCover } from './pdf-cover.js';
 
-const READER_BUILD = 'br-v106-kosync-spine-nav';
+const READER_BUILD = 'br-v107-kosync-dialog-arrow';
 const _i18nReady = initI18n();
 log('[codexa] reader build', READER_BUILD);
 
@@ -5986,7 +5986,12 @@ function showSyncDialog(best, localPct, localTime) {
     const fmtTs  = (ts) => ts ? new Date(ts * 1000).toLocaleString(getCurrentLang()) : t('reader.sync_dlg_unknown_time');
     const rDate  = fmtTs(best.timestamp);
     const lDate  = fmtTs(localTime);
-    const rNewer = (best.percentage || 0) >= localPct; // show the forward position as the highlight
+    // Chapter-first (see compareKosyncPosition) — matches whatever comparison actually decided
+    // to show this dialog in the first place. A raw percentage compare here (the old rNewer)
+    // could mark "This reader" as ahead by its own higher-but-different-scale percentage even
+    // while the dialog was correctly offering to jump to the remote's later chapter — visibly
+    // contradicting the Jump button right next to it (confirmed via a live screenshot).
+    const rNewer = compareKosyncPosition(best.percentage, best.progress, localPct, currentSpineIndex, 0.01) >= 0; // show the forward position as the highlight
     backdrop.innerHTML = `
       <div class="modal" role="dialog" aria-modal="true" style="max-width:460px">
         <h3 style="margin:0 0 .5rem;font-size:1rem;font-weight:600">${t('reader.sync_dlg_title')}</h3>
