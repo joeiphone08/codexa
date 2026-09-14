@@ -350,7 +350,15 @@ router.delete('/books/:boBookId/collections/:collectionId', async (req, res) => 
 // (server/routes/opds.js), but the source is BookOrbit's Bearer-token file endpoint instead of
 // an OPDS Basic-auth acquisition link. Shared by the single-book import route and the bulk
 // collection/smart-scope sync route below — never writes to `res` itself, just returns a result.
-const SUPPORTED_FORMATS = new Set(['epub', 'cbz', 'cbr', 'pdf']);
+// Kept in sync with the file-type story told everywhere else (multer's upload filter in
+// books.js, the error.epub_required message text itself) — a KEPUB is just an EPUB/ZIP
+// container as far as this app is concerned (see books.js's fileFilter comment), and both
+// callers below already fall through to outFormat 'epub' for it once past this gate. Missing
+// 'kepub' here meant BookOrbit libraries that report a file's format as "kepub" (e.g. Kobo-
+// synced .kepub.epub files kept as-is because the library has metadata/rename updates
+// disabled) got rejected with a 400 before ever reaching BookOrbit's own download endpoint —
+// see GitHub issue #34.
+const SUPPORTED_FORMATS = new Set(['epub', 'kepub', 'cbz', 'cbr', 'pdf']);
 
 async function importBookOrbitFile(userId, ctx, { boBookId, fileId, format, title, author, seriesName, seriesIndex, language, onProgress, abandonSignal }) {
   const clientFormat = String(format || '').toLowerCase();
