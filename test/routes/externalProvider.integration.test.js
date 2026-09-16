@@ -1,8 +1,8 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { Readable, PassThrough } = require('stream');
-const { EventEmitter } = require('events');
+const http = require('node:http');
+const { once } = require('node:events');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
@@ -50,47 +50,42 @@ function searchHtml() {
     ${row('fedcba9876543210fedcba9876543210', 'Public Domain Comic', 'Example Artist', 'CBZ')}</table>`;
 }
 
-function request(app, method, url, { headers = {}, body } = {}) {
+function request(server, method, url, { headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
-    const req = new Readable({
-      read() {
-        if (payload) this.push(payload);
-        this.push(null);
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port: server.address().port,
+      path: url,
+      method,
+      headers: {
+        ...headers,
+        ...(payload ? {
+          'content-type': 'application/json',
+          'content-length': String(payload.length),
+        } : {}),
       },
+      agent: false,
+    }, res => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('error', reject);
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        resolve({ status: res.statusCode, text, json: () => JSON.parse(text) });
+      });
     });
-    req.method = method;
-    req.url = url;
-    req.originalUrl = url;
-    req.headers = Object.fromEntries(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]));
-    if (payload) {
-      req.headers['content-type'] = 'application/json';
-      req.headers['content-length'] = String(payload.length);
-    }
-    req.socket = new PassThrough();
-    req.socket.remoteAddress = '127.0.0.1';
-    req.connection = req.socket;
-
-    const res = new EventEmitter();
-    const responseHeaders = new Map();
-    const chunks = [];
-    res.statusCode = 200;
-    res.setHeader = (name, value) => responseHeaders.set(String(name).toLowerCase(), value);
-    res.getHeader = name => responseHeaders.get(String(name).toLowerCase());
-    res.getHeaders = () => Object.fromEntries(responseHeaders);
-    res.removeHeader = name => responseHeaders.delete(String(name).toLowerCase());
-    res.writeHead = status => { res.statusCode = status; };
-    res.write = chunk => { if (chunk) chunks.push(Buffer.from(chunk)); return true; };
-    res.end = chunk => {
-      if (chunk) chunks.push(Buffer.from(chunk));
-      const text = Buffer.concat(chunks).toString('utf8');
-      resolve({ status: res.statusCode, text, json: () => JSON.parse(text) });
-    };
-    app.handle(req, res, reject);
+    req.on('error', reject);
+    req.setTimeout(5000, () => req.destroy(new Error('Integration request timed out')));
+    req.end(payload);
   });
 }
 
-test('authenticated provider search imports structurally valid EPUB and preserves CBZ through generic MIME', async () => {
+test('authenticated provider search imports structurally valid EPUB and preserves CBZ through generic MIME', async t => {
+  t.after(() => {
+    closeDb();
+    fs.rmSync(testDataDir, { recursive: true, force: true });
+  });
   initDb();
   const db = getDb();
   const user = db.prepare("INSERT INTO users (username, name, password_hash) VALUES ('reader', 'Reader', 'unused')").run();
@@ -122,12 +117,18 @@ test('authenticated provider search imports structurally valid EPUB and preserve
   const app = express();
   app.use(express.json());
   app.use('/api/opds', require('../../server/routes/opds'));
+  const server = http.createServer(app);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise((resolve, reject) => {
+    server.close(error => error ? reject(error) : resolve());
+  }));
   const auth = { authorization: `Bearer ${token}` };
 
-  const denied = await request(app, 'GET', '/api/opds/search/provider:fixture?q=alice');
+  const denied = await request(server, 'GET', '/api/opds/search/provider:fixture?q=alice');
   assert.equal(denied.status, 401);
 
-  const search = await request(app, 'GET', '/api/opds/search/provider:fixture?q=alice', { headers: auth });
+  const search = await request(server, 'GET', '/api/opds/search/provider:fixture?q=alice', { headers: auth });
   assert.equal(search.status, 200);
   const feed = search.json();
   assert.equal(feed.entries.length, 2);
@@ -135,7 +136,7 @@ test('authenticated provider search imports structurally valid EPUB and preserve
   assert.equal(feed.entries[1].acqType, 'application/vnd.comicbook+zip');
 
   for (const entry of feed.entries) {
-    const imported = await request(app, 'POST', '/api/opds/download/provider:fixture', {
+    const imported = await request(server, 'POST', '/api/opds/download/provider:fixture', {
       headers: auth,
       body: { href: entry.acqHref, title: entry.title, author: entry.author },
     });
@@ -150,13 +151,11 @@ test('authenticated provider search imports structurally valid EPUB and preserve
   assert.equal(rows[0].title, "Alice's Adventures in Wonderland");
   assert.equal(rows[0].author, 'Lewis Carroll');
 
-  const peek = await request(app, 'POST', '/api/opds/peek/provider:fixture', {
+  const peek = await request(server, 'POST', '/api/opds/peek/provider:fixture', {
     headers: auth,
     body: { href: feed.entries[1].acqHref, title: feed.entries[1].title, author: feed.entries[1].author },
   });
   assert.equal(peek.status, 201);
   assert.equal(peek.json().ephemeral, false);
 
-  closeDb();
-  fs.rmSync(testDataDir, { recursive: true, force: true });
 });
