@@ -866,9 +866,11 @@ router.get('/search/:id', async (req, res) => {
       return res.json(feed);
     } catch (err) {
       console.warn(`[provider:${provider.id}] search error:`, err.message);
-      const status = err.message === 'error.external_busy' ? 429
-        : err.message === 'error.external_timeout' ? 504 : 502;
-      return res.status(status).json({ error: err.message });
+      const error = err.message === 'HTTP 403' ? 'error.external_search_rejected'
+        : err.message === 'HTTP 429' ? 'error.external_busy' : err.message;
+      const status = error === 'error.external_busy' ? 429
+        : error === 'error.external_timeout' ? 504 : 502;
+      return res.status(status).json({ error });
     }
   }
 

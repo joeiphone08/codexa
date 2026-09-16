@@ -101,6 +101,8 @@ test('authenticated provider search imports structurally valid EPUB and preserve
     directHosts: ['files.example.test'],
     referenceSecret: 'integration-test-provider-reference-secret',
     fetchHtml: async url => {
+      if (url.includes('q=blocked')) throw new Error('HTTP 403');
+      if (url.includes('q=limited')) throw new Error('HTTP 429');
       if (url.includes('/search?')) return searchHtml();
       if (url.includes('0123456789abcdef')) return '<a download href="https://files.example.test/alice.epub">Download EPUB</a>';
       return '<a download href="https://files.example.test/comic.cbz">Download CBZ</a>';
@@ -127,6 +129,13 @@ test('authenticated provider search imports structurally valid EPUB and preserve
 
   const denied = await request(server, 'GET', '/api/opds/search/provider:fixture?q=alice');
   assert.equal(denied.status, 401);
+
+  const blocked = await request(server, 'GET', '/api/opds/search/provider:fixture?q=blocked', { headers: auth });
+  assert.equal(blocked.status, 502);
+  assert.equal(blocked.json().error, 'error.external_search_rejected');
+  const limited = await request(server, 'GET', '/api/opds/search/provider:fixture?q=limited', { headers: auth });
+  assert.equal(limited.status, 429);
+  assert.equal(limited.json().error, 'error.external_busy');
 
   const search = await request(server, 'GET', '/api/opds/search/provider:fixture?q=alice', { headers: auth });
   assert.equal(search.status, 200);

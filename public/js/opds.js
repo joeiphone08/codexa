@@ -352,6 +352,9 @@ function renderFeed(feed) {
   const bookEntries = feed.entries?.filter(e => !e.isNav) || [];
 
   opdsWelcome.hidden = true;
+  catalogEmpty.setAttribute('data-i18n', 'opds.no_results');
+  catalogEmpty.textContent = t('opds.no_results');
+  catalogEmpty.removeAttribute('role');
   catalogEmpty.hidden = !!(navEntries.length || bookEntries.length);
 
   // — Navigation tiles —
@@ -698,7 +701,20 @@ async function doSearch() {
     renderPagination();
     btnUp.disabled = false;
   } catch (err) {
-    toast.error(t('opds.err_search', { msg: err.message }));
+    // Keep failures visible after the toast expires, and remove stale results.
+    _lastFeed = null;
+    currentFeed = null;
+    pageHistory = [];
+    navTilesEl.hidden = true;
+    bookGridEl.hidden = true;
+    opdsWelcome.hidden = true;
+    renderPagination();
+    const message = t('opds.err_search', { msg: err.message });
+    catalogEmpty.removeAttribute('data-i18n');
+    catalogEmpty.setAttribute('role', 'alert');
+    catalogEmpty.textContent = message;
+    catalogEmpty.hidden = false;
+    toast.error(message);
   } finally {
     setLoading(false);
   }

@@ -802,6 +802,7 @@
   "error.external_connect_timeout": "The connection to the external provider timed out.",
   "error.external_connection_failed": "Codexa could not connect to the external provider.",
   "error.external_busy": "The external provider is busy. Try again shortly.",
+  "error.external_search_rejected": "The provider rejected automated search (HTTP 403). Codexa cannot retrieve results from this provider right now. You can retry with Search.",
   "error.external_too_many_redirects": "The external provider returned too many redirects.",
   "error.external_invalid_redirect": "The external provider returned an invalid redirect.",
   "error.external_unexpected_content_type": "The external provider returned an unexpected content type.",
