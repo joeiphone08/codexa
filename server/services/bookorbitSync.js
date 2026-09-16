@@ -20,8 +20,116 @@
 // Off unless the user enabled it AND configured BookOrbit account credentials.
 
 const crypto = require('crypto');
+const dns = require('dns').promises;
+const net = require('net');
 const { getDb } = require('../db');
 const { runWithUser } = require('../utils/logger');
+const { decryptSecret } = require('../utils/credentialCrypto');
+
+// ── SSRF guard for the user-supplied BookOrbit server URL ─────────────────────
+// bookorbit_url / kosync_url are per-user settings any authenticated account can write
+// (server/routes/settings.js's PUT /api/settings). Every fetch in this file targets them, and
+// several callers in server/routes/bookorbit.js hand the response body straight back to that
+// same user (GET /libraries, /books, /dashboard) or write it to disk as an importable "book".
+// That is a full read-primitive server-side request forgery: pointed at http://127.0.0.1:<port>,
+// http://169.254.169.254/ (cloud metadata) or anything on the platform's private network, it
+// turns this server into a proxy into its own trust boundary. Harmless when Codexa is the LAN
+// app it used to be — where pointing at http://192.168.1.x IS the normal configuration — so the
+// block is production-only, with an explicit opt-out for anyone self-hosting both halves on a
+// private network.
+const SSRF_GUARD =
+  process.env.NODE_ENV === 'production' &&
+  process.env.BOOKORBIT_ALLOW_PRIVATE_NETWORK !== 'true';
+
+function ipv4Blocked(ip) {
+  const p = ip.split('.').map(Number);
+  if (p.length !== 4 || p.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+  const [a, b] = p;
+  if (a === 0 || a === 10 || a === 127) return true;          // this-host / RFC1918 / loopback
+  if (a === 100 && b >= 64 && b <= 127) return true;          // 100.64/10 CGNAT
+  if (a === 169 && b === 254) return true;                    // link-local — incl. 169.254.169.254
+  if (a === 172 && b >= 16 && b <= 31) return true;           // 172.16/12
+  if (a === 192 && (b === 0 || b === 168)) return true;       // 192.0.0/24, 192.168/16
+  if (a === 198 && (b === 18 || b === 19)) return true;       // 198.18/15 benchmarking
+  if (a >= 224) return true;                                  // multicast, reserved, broadcast
+  return false;
+}
+
+function ipv6Blocked(ip) {
+  const s = ip.toLowerCase().split('%')[0];                   // drop any zone id
+  if (s === '::' || s === '::1') return true;
+  // IPv4-mapped/NAT64 forms reach IPv4 destinations, so they get the IPv4 rules.
+  const dotted = s.match(/^(?:::ffff:|64:ff9b::)(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) return ipv4Blocked(dotted[1]);
+  const hexMapped = s.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (hexMapped) {
+    const hi = parseInt(hexMapped[1], 16);
+    const lo = parseInt(hexMapped[2], 16);
+    return ipv4Blocked([hi >> 8, hi & 255, lo >> 8, lo & 255].join('.'));
+  }
+  const head = parseInt(s.split(':')[0], 16);
+  if (!Number.isFinite(head)) return true;                    // anything unparseable: refuse
+  if ((head & 0xfe00) === 0xfc00) return true;                // fc00::/7 unique-local (Railway private networking)
+  if ((head & 0xffc0) === 0xfe80) return true;                // fe80::/10 link-local
+  if ((head & 0xff00) === 0xff00) return true;                // ff00::/8 multicast
+  return false;
+}
+
+const HOST_CHECK_TTL_MS = 60 * 1000;
+const HOST_CHECK_CACHE_MAX = 500;
+const _hostCheckCache = new Map(); // hostname -> { at, error|null }
+
+// Bounded: the key is a user-supplied hostname, so without a cap an authenticated account could
+// grow this without limit just by rewriting bookorbit_url in a loop. Oldest-first eviction
+// (Map preserves insertion order) — a re-checked host simply pays one more DNS lookup.
+function rememberHostCheck(host, error) {
+  if (_hostCheckCache.size >= HOST_CHECK_CACHE_MAX) {
+    _hostCheckCache.delete(_hostCheckCache.keys().next().value);
+  }
+  _hostCheckCache.set(host, { at: Date.now(), error });
+}
+
+// Throws with a user-presentable message when the URL isn't safe to fetch. The scheme check is
+// unconditional (no environment has a reason to let a settings field aim fetch at file:/data:);
+// the address check is what SSRF_GUARD gates.
+async function assertFetchableUrl(rawUrl) {
+  let u;
+  try { u = new URL(rawUrl); } catch { throw new Error('BookOrbit URL is not a valid URL'); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error(`unsupported BookOrbit URL scheme "${u.protocol}"`);
+  }
+  if (!SSRF_GUARD) return;
+
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  const cached = _hostCheckCache.get(host);
+  if (cached && Date.now() - cached.at < HOST_CHECK_TTL_MS) {
+    if (cached.error) throw new Error(cached.error);
+    return;
+  }
+  const fail = (msg) => { rememberHostCheck(host, msg); throw new Error(msg); };
+
+  const literal = net.isIP(host);
+  let addrs;
+  if (literal) {
+    addrs = [{ address: host, family: literal }];
+  } else {
+    try { addrs = await dns.lookup(host, { all: true }); }
+    catch { fail(`cannot resolve BookOrbit host "${host}"`); }
+  }
+  for (const a of addrs) {
+    if (a.family === 6 ? ipv6Blocked(a.address) : ipv4Blocked(a.address)) {
+      fail(`BookOrbit URL resolves to a private or loopback address (${a.address}) — refusing to connect`);
+    }
+  }
+  rememberHostCheck(host, null);
+}
+
+// Every outbound request in this file goes through here instead of calling fetch() directly.
+// Rejections land in each call site's existing catch, so a blocked host surfaces the same way
+// an unreachable one always has (recordStatus / "reachable: false" in the settings UI).
+function safeFetch(url, init) {
+  return assertFetchableUrl(url).then(() => fetch(url, init));
+}
 
 const TIMEOUT_MS = 15000;
 // Idle timeout for fetchAssetStream's book-file download only — a large comic/PDF can
@@ -68,7 +176,13 @@ function getContext(userId, { ignoreEnabled = false } = {}) {
     'SELECT bookorbit_url, kosync_url, kosync_username, kosync_password_enc, bookorbit_sync_enabled, bookorbit_account_username, bookorbit_account_password_enc FROM user_settings WHERE user_id = ?'
   ).get(userId);
   if (!s || (!ignoreEnabled && s.bookorbit_sync_enabled !== 1)) return null;
-  if (!s.bookorbit_url || !s.bookorbit_account_username || !s.bookorbit_account_password_enc) return null;
+  // The *_enc columns hold AES-256-GCM blobs for rows saved since credential
+  // encryption landed and bare plaintext for older ones; decryptSecret() takes
+  // both and never throws, yielding '' for a blob it can't open (rotated
+  // JWT_SECRET) — which then reads as "not configured" here, or as a normal
+  // upstream 401 below, instead of taking down the sync loop.
+  const bookorbitPassword = decryptSecret(s.bookorbit_account_password_enc);
+  if (!s.bookorbit_url || !s.bookorbit_account_username || !bookorbitPassword) return null;
   const webBase = normalizeBookorbitUrl(s.bookorbit_url);
   if (!webBase) return null;
   let origin;
@@ -78,12 +192,13 @@ function getContext(userId, { ignoreEnabled = false } = {}) {
   // independently under KOReader Sync, not required for BookOrbit extended sync to work at all.
   const koreaderBase = String(s.kosync_url || '').replace(/\/+$/, '');
   const koreaderUser = s.kosync_username || '';
-  const koreaderKey = s.kosync_password_enc
-    ? crypto.createHash('md5').update(String(s.kosync_password_enc)).digest('hex')
+  const koreaderPassword = decryptSecret(s.kosync_password_enc);
+  const koreaderKey = koreaderPassword
+    ? crypto.createHash('md5').update(String(koreaderPassword)).digest('hex')
     : '';
   return {
     webBase, origin,
-    username: s.bookorbit_account_username, password: s.bookorbit_account_password_enc,
+    username: s.bookorbit_account_username, password: bookorbitPassword,
     koreaderBase, koreaderUser, koreaderKey,
   };
 }
@@ -136,7 +251,7 @@ function extractToken(setCookies, name) {
 async function login(userId, ctx) {
   let res;
   try {
-    res = await fetch(`${ctx.webBase}/auth/login`, {
+    res = await safeFetch(`${ctx.webBase}/auth/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json' },
       body: JSON.stringify({ username: ctx.username, password: ctx.password }),
@@ -166,7 +281,7 @@ async function refresh(userId, ctx) {
   if (!tok?.refresh) return login(userId, ctx);
   let res;
   try {
-    res = await fetch(`${ctx.webBase}/auth/refresh`, {
+    res = await safeFetch(`${ctx.webBase}/auth/refresh`, {
       method: 'POST',
       headers: { cookie: `refresh_token=${encodeURIComponent(tok.refresh)}`, accept: 'application/json' },
       signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -196,7 +311,7 @@ async function api(userId, ctx, method, path, body, state = { refreshed: false, 
   await sleep(PACE_MS);
   let res;
   try {
-    res = await fetch(`${ctx.webBase}${path}`, {
+    res = await safeFetch(`${ctx.webBase}${path}`, {
       method,
       headers: {
         authorization: `Bearer ${tok.access}`,
@@ -274,7 +389,7 @@ async function matchCheckHashes(ctx, hashes) {
       await sleep(PACE_MS);
       let res;
       try {
-        res = await fetch(`${ctx.koreaderBase}/plugin/match-check`, {
+        res = await safeFetch(`${ctx.koreaderBase}/plugin/match-check`, {
           method: 'POST',
           headers,
           body: JSON.stringify({ deviceId: 'codexa-web', deviceModel: 'Codexa', pluginVersion: '1.0', hashes: batch }),
@@ -629,7 +744,7 @@ async function fetchAsset(userId, ctx, path) {
   }
   const doFetch = () => {
     const tok = tokens.get(userId);
-    return fetch(`${ctx.webBase}${path}`, {
+    return safeFetch(`${ctx.webBase}${path}`, {
       headers: { authorization: `Bearer ${tok.access}` },
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
@@ -681,7 +796,7 @@ async function fetchAssetStream(userId, ctx, path, onProgress, abandonSignal) {
   const doFetch = () => {
     const tok = tokens.get(userId);
     armIdleTimer();
-    return fetch(`${ctx.webBase}${path}`, {
+    return safeFetch(`${ctx.webBase}${path}`, {
       headers: { authorization: `Bearer ${tok.access}` },
       signal: controller.signal,
     });

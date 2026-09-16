@@ -11,7 +11,7 @@
 # — so Alpine is safe again, and preferred: it keeps the pushed image under ~80MB instead of
 # bookworm-slim's ~100MB+, which matters because Codeberg's container registry enforces a
 # per-package storage quota (413 enforcePackagesQuota) that the larger image tripped.
-FROM node:24-alpine AS build
+FROM node:24-alpine@sha256:50c8e8ca1d27439048670df5883f32d57cf81cff6233222c893fd0d9884cbd81 AS build
 
 WORKDIR /app
 
@@ -44,7 +44,7 @@ RUN npm run build
 RUN rm -rf node_modules && npm ci --omit=dev --no-audit --no-fund
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM node:24-alpine
+FROM node:24-alpine@sha256:50c8e8ca1d27439048670df5883f32d57cf81cff6233222c893fd0d9884cbd81
 
 WORKDIR /app
 
@@ -63,6 +63,8 @@ COPY . .
 RUN mkdir -p /data && chown codexa:codexa /data && \
     chmod +x /app/entrypoint.sh
 ENV DATA_DIR=/data
+# Express/npm production mode: disables dev-only error output and enables view caching
+ENV NODE_ENV=production
 
 EXPOSE 3000
 

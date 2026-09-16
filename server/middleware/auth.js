@@ -21,7 +21,11 @@ function authenticateToken(req, res, next) {
   }
 
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    // algorithms is pinned deliberately: without it jsonwebtoken accepts whatever `alg` the
+    // token's own (unauthenticated) header asks for, which is how alg=none and HS/RS confusion
+    // attacks get in. Every token this app issues is HS256 (server/routes/auth.js signToken,
+    // server/routes/oidc.js) — anything else is forged by definition.
+    const payload = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
     // Verify the user still exists in the database (guards against stale tokens
     // after a database reset or user deletion)
     const user = getDb().prepare('SELECT id, username, name FROM users WHERE id = ?').get(payload.id);

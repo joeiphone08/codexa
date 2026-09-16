@@ -87,21 +87,57 @@ function formatSize(bytes) {
     : (bytes / 1024 / 1024).toFixed(1) + ' MB';
 }
 
+// Book and catalog descriptions are untrusted: a book's comes straight out of an uploaded
+// EPUB's <dc:description>, a BookOrbit/OPDS one out of a remote catalog we don't control.
+// They do legitimately carry light markup (<p>, <em>, <br>, links) that's worth rendering, so
+// this strips rather than escapes — but three things about the old version made it a sink
+// rather than a defense:
+//
+//  * It parsed into a LIVE detached <div>. Assigning attacker HTML to a live element's
+//    innerHTML starts image/media loads and fires their handlers immediately — before the
+//    on*-stripping loop below has run even once. A DOMParser document is inert: scripting off,
+//    no resource fetches, nothing to race.
+//  * It kept every element it didn't name. <base href="//evil/"> re-points every relative URL
+//    on the whole page; <meta http-equiv="refresh"> navigates away; <noscript>/<template>/
+//    <svg>/<math> re-parse differently than they serialize, and this function returns a STRING
+//    that its callers hand back to innerHTML, which is exactly the mXSS setup.
+//  * It scheme-checked only <a href>, so src/action/formaction/xlink:href were unchecked, and
+//    it used a prefix blocklist that "jav&#x09;ascript:" walks past post-entity-decoding.
+const SANITIZE_DROP_TAGS =
+  'script,style,iframe,frame,frameset,object,embed,applet,form,input,button,select,textarea,' +
+  'link,meta,base,template,svg,math,noembed,noframes,title,xmp,portal,' +
+  'animate,set,animateTransform';
+const SANITIZE_URL_ATTRS = new Set([
+  'href', 'src', 'xlink:href', 'action', 'formaction',
+  'srcdoc', 'data', 'poster', 'background', 'srcset', 'ping', 'longdesc',
+]);
+const SANITIZE_IMG_ATTRS = new Set(['src', 'poster', 'background', 'srcset']);
+
+function isSafeUrlValue(value, attrName) {
+  const bare = String(value).replace(/[\s\u0000-\u001f]/g, '');
+  const m = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(bare);
+  if (!m) return true;   // no scheme at all — relative/fragment, always fine
+  const scheme = m[1].toLowerCase();
+  if (scheme === 'http' || scheme === 'https' || scheme === 'mailto') return true;
+  return scheme === 'data' && SANITIZE_IMG_ATTRS.has(attrName) && /^data:image\//i.test(bare);
+}
+
 export function sanitizeHtml(html) {
   if (!html) return '';
-  const tmp = document.createElement('div');
-  tmp.innerHTML = html;
-  tmp.querySelectorAll('script,style,iframe,object,embed,form,input,button,link').forEach(el => el.remove());
-  tmp.querySelectorAll('*').forEach(el => {
+  const doc = new DOMParser().parseFromString(String(html), 'text/html');
+  // Unwrap first, so the freed children still go through the attribute pass below.
+  doc.querySelectorAll('noscript').forEach(el => el.replaceWith(...el.childNodes));
+  doc.querySelectorAll(SANITIZE_DROP_TAGS).forEach(el => el.remove());
+  doc.body.querySelectorAll('*').forEach(el => {
     for (const attr of [...el.attributes]) {
-      if (attr.name.startsWith('on')) el.removeAttribute(attr.name);
-    }
-    if (el.tagName === 'A') {
-      const href = el.getAttribute('href') || '';
-      if (href && !/^(https?:|\/|#)/.test(href)) el.removeAttribute('href');
+      const name = attr.name.toLowerCase();
+      if (name.startsWith('on') || name === 'srcdoc') { el.removeAttribute(attr.name); continue; }
+      if (SANITIZE_URL_ATTRS.has(name) && !isSafeUrlValue(attr.value, name)) {
+        el.removeAttribute(attr.name);
+      }
     }
   });
-  return tmp.innerHTML;
+  return doc.body.innerHTML;
 }
 
 // ── Sort ──────────────────────────────────────────────────────────────────────
@@ -1183,7 +1219,7 @@ export async function openInfoModal(book, startTab = '') {
           }
         }
       } catch (err) {
-        ikResults.innerHTML = `<div class="info-modal-kosync-no-results">${t('common.err_prefix')}${err.message}</div>`;
+        ikResults.innerHTML = `<div class="info-modal-kosync-no-results">${escHtml(t('common.err_prefix') + err.message)}</div>`;
       }
       setButtonLoading(ikSearch, false, t('library.kosync_search'));
     };
@@ -1311,7 +1347,7 @@ export async function openInfoModal(book, startTab = '') {
       });
 
     } catch (err) {
-      inner.innerHTML = `<div class="imt-empty">${t('common.err_prefix')}${err.message}</div>`;
+      inner.innerHTML = `<div class="imt-empty">${escHtml(t('common.err_prefix') + err.message)}</div>`;
     }
   }
 
@@ -1371,7 +1407,7 @@ export async function openInfoModal(book, startTab = '') {
 
       inner.innerHTML = sections.length ? sections.join('') : `<div class="imt-empty">${t('library.related_empty')}</div>`;
     } catch (err) {
-      inner.innerHTML = `<div class="imt-empty">${t('common.err_prefix')}${err.message}</div>`;
+      inner.innerHTML = `<div class="imt-empty">${escHtml(t('common.err_prefix') + err.message)}</div>`;
     }
   }
 

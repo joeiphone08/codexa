@@ -885,7 +885,7 @@ export function openBookorbitSyncModal(source, id, name, existingShelfId = null)
       backdrop.querySelector('#bos-shelf-name').focus();
     })
     .catch(err => {
-      backdrop.querySelector('#bos-scanning').innerHTML = `<span style="color:var(--color-danger)">${t('common.error_msg', { msg: err.message })}</span>`;
+      backdrop.querySelector('#bos-scanning').innerHTML = `<span style="color:var(--color-danger)">${escHtml(t('common.error_msg', { msg: err.message }))}</span>`;
     });
 
   backdrop.querySelector('#bos-cancel')?.addEventListener('click', close);

@@ -18,10 +18,13 @@
 const express = require('express');
 const bcrypt  = require('bcrypt');
 const crypto  = require('crypto');
+const rateLimit = require('express-rate-limit');
 const { getDb }             = require('../db');
 const { authenticateToken } = require('../middleware/auth');
+const { isRegistrationEnabled, authLimiter } = require('./auth');
 const { maybeMarkBookFinished } = require('../utils/bookCompletion');
 const bookorbit             = require('../services/bookorbitSync');
+const { decryptSecret }     = require('../utils/credentialCrypto');
 
 // ── Basic Auth helper ─────────────────────────────────────────────────────────
 function parseBasicAuth(req) {
@@ -54,10 +57,28 @@ async function verifyBasicAuth(req) {
 // ── kosyncRouter — the public KOReader protocol endpoints ─────────────────────
 const kosyncRouter = express.Router();
 
+// Brute-force guard for the whole KOReader protocol surface. Every route below authenticates
+// with the account's real username+password (verifyBasicAuth), and they are mounted at the
+// server root — outside /api — so neither the web login limiter in auth.js nor the global /api
+// limiter in server/index.js ever sees them. Unmetered, that made them an unlimited password-
+// guessing oracle against every account on the server. Only a 401 counts toward the limit
+// (requestWasSuccessful below), so a legitimately syncing KOReader device is never throttled,
+// no matter how often it pushes or polls progress.
+const kosyncAuthLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  requestWasSuccessful:   (_req, res) => res.statusCode !== 401,
+  skipSuccessfulRequests: true,
+  message: { error: 'TOO_MANY_REQUESTS' },
+});
+kosyncRouter.use(kosyncAuthLimiter);
+
 // POST /users/create
 // KOReader registers a new account on this server.
 // Returns 409 if username taken (KOReader will then try /users/auth instead).
-kosyncRouter.post('/users/create', async (req, res) => {
+kosyncRouter.post('/users/create', authLimiter, async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ error: 'MISSING_FIELD' });
@@ -72,6 +93,15 @@ kosyncRouter.post('/users/create', async (req, res) => {
   }
 
   const db = getDb();
+  // Accounts created here are ordinary Codexa accounts (same users table, usable straight away
+  // at /api/auth/login), so this route has to respect the very same admin "registration
+  // enabled" toggle that gates POST /api/auth/register — otherwise turning self-service
+  // registration off closes the front door while leaving this one wide open to anyone on the
+  // internet. Same first-account exception as auth.js: an empty instance can always be seeded.
+  const hasUsers = !!db.prepare('SELECT 1 FROM users LIMIT 1').get();
+  if (hasUsers && !isRegistrationEnabled(db)) {
+    return res.status(403).json({ error: 'REGISTRATION_DISABLED' });
+  }
   const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
   if (existing) {
     return res.status(409).json({ error: 'USERNAME_REGISTERED' });
@@ -188,7 +218,13 @@ function findBookIdForDocument(userId, document) {
 // KOReader kosync protocol uses custom headers, NOT HTTP Basic Auth.
 // x-auth-user = username plain text
 // x-auth-key  = MD5 hex of password (as KOReader sends it)
-function buildKoreaderHeaders(username, password) {
+// `storedPassword` is the raw kosync_password_enc column value: AES-256-GCM
+// ciphertext for rows saved since credential encryption landed, bare plaintext
+// for older rows. decryptSecret() handles both and never throws, returning ''
+// when the blob can't be opened (e.g. JWT_SECRET rotated) — the upstream server
+// then simply answers 401 and the caller's normal auth-failed path runs.
+function buildKoreaderHeaders(username, storedPassword) {
+  const password = decryptSecret(storedPassword);
   return {
     'x-auth-user': username,
     'x-auth-key':  crypto.createHash('md5').update(String(password)).digest('hex'),

@@ -2320,6 +2320,77 @@ function attachIframeFootnotes(contents) {
   }, { capture: true });
 }
 
+// ── Strict sanitizer for untrusted rich HTML rendered into the READER'S OWN document ─────────
+//
+// Two features pull markup we did not author out of its sandbox and into this page: the
+// footnote popup (source: raw chapter XHTML from whatever EPUB the user opened) and the
+// dictionary popup (source: a StarDict file, as often downloaded from a stranger on the
+// internet as hand-made). Both genuinely need light markup to be readable at all — <b>, <i>,
+// <p>, lists, links — so this strips rather than escapes.
+//
+// What goes, and why it isn't just "script + on*":
+//   * anything executable or navigable on its own: <script>, <iframe>, <object>, <embed>,
+//     <applet>, <form>/<input>/<button>, <link>, <meta>, <base>. An <iframe srcdoc> or
+//     <iframe src="javascript:..."> dropped into THIS document runs as this origin, with the
+//     auth token in localStorage one property access away.
+//   * <noscript>, <template>, <svg>, <math>, <xmp>, <title>, <textarea>: elements whose
+//     children re-parse differently than they serialize. Callers hand the returned STRING back
+//     to innerHTML, and HTML attribute serialization does not escape "<" or ">", so these are
+//     the standard mXSS carriers. SVG also brings <animate>, which can rewrite an ancestor
+//     <a>'s href to javascript: after the scheme check below has already passed it.
+//   * every on* handler, and every URL-bearing attribute whose value isn't plainly safe.
+const _RICH_UNSAFE_TAGS =
+  'script,style,iframe,frame,frameset,object,embed,applet,form,input,button,select,textarea,' +
+  'link,meta,base,template,svg,math,noembed,noframes,title,xmp,portal,' +
+  'animate,set,animateTransform';
+const _RICH_URL_ATTRS = new Set([
+  'href', 'src', 'xlink:href', 'action', 'formaction',
+  'srcdoc', 'data', 'poster', 'background', 'srcset', 'ping', 'longdesc',
+]);
+// Attributes that only ever point at an image, so a data:image/... payload is safe in them
+// (an SVG loaded through <img> can't run script) but not, say, in an href you can click.
+const _RICH_IMG_ATTRS = new Set(['src', 'poster', 'background', 'srcset']);
+
+// Scheme allowlist, not a javascript:/data: blocklist — a blocklist loses to
+// "jav&#x09;ascript:" and friends, which the parser has already decoded by the time we see
+// the attribute value. A value with no scheme at all is relative and always fine.
+function _isSafeRichUrl(value, attrName) {
+  const bare = String(value).replace(/[\s\u0000-\u001f]/g, '');
+  const m = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(bare);
+  if (!m) return true;
+  const scheme = m[1].toLowerCase();
+  if (scheme === 'http' || scheme === 'https' || scheme === 'mailto' || scheme === 'blob') return true;
+  return scheme === 'data' && _RICH_IMG_ATTRS.has(attrName) && /^data:image\//i.test(bare);
+}
+
+// Sanitizes `root` IN PLACE and returns its innerHTML.
+function sanitizeRichNode(root) {
+  // Unwrapped, not dropped, and before anything else — see cxreader/renderer.js's _sanitizeDoc
+  // for why <noscript> is the mXSS carrier and why freeing its children (which the attribute
+  // pass below then covers) is both safer and less lossy than deleting them.
+  root.querySelectorAll('noscript').forEach(n => n.replaceWith(...n.childNodes));
+  root.querySelectorAll(_RICH_UNSAFE_TAGS).forEach(n => n.remove());
+  root.querySelectorAll('*').forEach(n => {
+    for (const attr of [...n.attributes]) {
+      const name = attr.name.toLowerCase();
+      if (name.startsWith('on') || name === 'srcdoc') { n.removeAttribute(attr.name); continue; }
+      if (_RICH_URL_ATTRS.has(name) && !_isSafeRichUrl(attr.value, name)) {
+        n.removeAttribute(attr.name);
+      }
+    }
+  });
+  return root.innerHTML;
+}
+
+// Same, for a raw HTML string. Parsed with DOMParser rather than assigned to a detached
+// element's innerHTML on purpose: a DOMParser document is inert (scripting off, no resource
+// loads), whereas `document.createElement('div').innerHTML = html` starts image loads — and
+// fires their onerror — before a single attribute has been stripped.
+function sanitizeRichHtml(html) {
+  if (!html) return '';
+  return sanitizeRichNode(new DOMParser().parseFromString(String(html), 'text/html').body);
+}
+
 // Strip epub backlinks and dangerous content from a cloned footnote element.
 // Returns innerHTML string, or null if nothing meaningful remains.
 function _sanitizeFootnoteHtml(el) {
@@ -2330,14 +2401,10 @@ function _sanitizeFootnoteHtml(el) {
   clone.querySelectorAll('a').forEach(a => {
     if (/^[↩↑\^⬆←▲🔙]$/.test(a.textContent.trim())) a.remove();
   });
-  // Remove scripts and on* attributes
-  clone.querySelectorAll('script').forEach(n => n.remove());
-  clone.querySelectorAll('*').forEach(n => {
-    for (const attr of [...n.attributes]) {
-      if (attr.name.startsWith('on')) n.removeAttribute(attr.name);
-    }
-  });
-  const html = clone.innerHTML.trim();
+  // Cross-document footnotes (showFootnotePopup's crossDocHref branch) parse the target
+  // chapter's RAW source — it never went through cxreader's own _sanitizeDoc, so everything
+  // this sanitizer removes is genuinely reachable here straight out of the book file.
+  const html = sanitizeRichNode(clone).trim();
   return html || null;
 }
 
@@ -4459,16 +4526,21 @@ async function showDictPopup(word) {
       resultsEl.innerHTML = `<div class="dict-empty">${t('reader.dict_not_found', { word: esc(displayWord) })}</div>`;
     } else {
       resultsEl.innerHTML = data.results.map((r, i) => {
-        // HTML type: render as HTML but strip any <script>/<style> for safety.
+        // HTML type: render as HTML, through the strict sanitizer above.
         // Plain text type (m/g/others): escape and preserve newlines.
         // Also auto-detect HTML content: some dicts declare sametypesequence=m but
         // actually contain HTML/markup (common in community StarDict dictionaries).
+        //
+        // A StarDict file is data from wherever the user got it — community dictionaries are
+        // passed around as downloads far more often than they're built by hand — and this is
+        // the reader's OWN document, not the book iframe. The regex pass this used to do
+        // (delete <script>…</script> and <style>…</style>) only ever removed those two exact,
+        // properly-closed pairs: `<img src=x onerror=…>` or `<iframe srcdoc=…>` in a
+        // definition went straight through into the page and ran as this origin.
         const looksLikeHtml = r.type !== 'h' && /<[a-zA-Z][^>]*>/.test(r.definition);
         let defHtml;
         if (r.type === 'h' || looksLikeHtml) {
-          const clean = r.definition
-            .replace(/<script[\s\S]*?<\/script>/gi, '')
-            .replace(/<style[\s\S]*?<\/style>/gi, '');
+          const clean = sanitizeRichHtml(r.definition);
           defHtml = `<div class="dict-result-def html-def">${clean}</div>`;
         } else {
           defHtml = `<div class="dict-result-def">${esc(r.definition).replace(/\n/g, '<br>')}</div>`;
@@ -4500,7 +4572,26 @@ function closeDictPopup() {
 }
 
 // Receive messages from iframe contexts (origin may vary on iOS/blob views).
+//
+// e.origin is genuinely unusable as the gate here: the chapter frame is a blob: document in a
+// sandbox, which reads back as "null" on some engines and as this page's origin on others, and
+// most of these messages are actually posted by reader.js's OWN in-frame hooks running in this
+// window (window.parent === window on a top-level page), not by the frame. So gate on the
+// source WINDOW instead — this window, or one of its frames. Anything else is a third-party
+// page that opened the reader with window.open(): it can't frame us (frame-ancestors 'self' /
+// X-Frame-Options), but it can still hold a handle and post at us.
+function isOwnMessageSource(source) {
+  // Some old WebViews hand back a null source for same-window posts; don't break the reader
+  // over it — those can't come from a foreign document anyway.
+  if (!source || source === window) return true;
+  for (let i = 0; i < window.frames.length; i++) {
+    if (window.frames[i] === source) return true;
+  }
+  return false;
+}
+
 window.addEventListener('message', (e) => {
+  if (!isOwnMessageSource(e.source)) return;
   if (e.data?.type === 'dict-lookup') {
     const word = String(e.data.word || '').trim();
     if (!word || word.length > 120) return;
@@ -6006,7 +6097,7 @@ function showSyncDialog(best, localPct, localTime) {
           </thead>
           <tbody>
             <tr style="${rNewer ? 'font-weight:600' : ''}">
-              <td style="padding:.3rem 0">${best.device || 'KOReader'} ${rNewer ? '▲' : ''}</td>
+              <td style="padding:.3rem 0">${escapeHtml(best.device || 'KOReader')} ${rNewer ? '▲' : ''}</td>
               <td style="text-align:right">${rPct}%</td>
               <td style="text-align:right;color:var(--color-text-muted);font-size:.78rem">${rDate}</td>
             </tr>
@@ -6679,6 +6770,7 @@ async function startCXRendition(displayCfi = null) {
   // Intercept in-book <a> clicks posted from the iframe via postMessage
   if (_cxLinkHandler) window.removeEventListener('message', _cxLinkHandler);
   _cxLinkHandler = (e) => {
+    if (!isOwnMessageSource(e.source)) return;
     if (e.data?.type !== 'cx-link' || !_cxReader) return;
     void _cxReader.goToHref(e.data.href);
   };

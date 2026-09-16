@@ -118,18 +118,74 @@ export class ChapterRenderer {
   // Real books never legitimately need any of these for reading, so they're stripped outright
   // rather than sanitized-in-place. Called on every fresh parse, before anything else touches
   // the document (including the e-ink pre-render pass below, which only needs layout/CSS).
+  //
+  // Three things beyond the obvious <script>/on*/javascript: trio are stripped here, each
+  // because it defeats this exact sanitizer rather than because books ever use it:
+  //
+  //  * <noscript> and <template>. This document is sanitized as a DOMParser document (parsed
+  //    with scripting DISABLED), then serialized back to a string and RE-parsed by the browser
+  //    when the blob loads (scripting ENABLED). Those two elements' children parse differently
+  //    under the two settings, and HTML attribute serialization does not escape "<" or ">", so
+  //    `<noscript><p title="</noscript><img src=x onerror=...>">` is one harmless <p> with a
+  //    title here and a live <img> after the round trip — classic mXSS, never seen by any of
+  //    the attribute stripping below. <noscript> is UNWRAPPED rather than dropped: with the
+  //    book's own scripts stripped, its fallback content is the content that should show, and
+  //    once it's no longer inside a <noscript> the round trip has nothing left to reinterpret.
+  //    <template> is dropped outright — querySelectorAll doesn't reach into its .content, so
+  //    unwrapping one would surface markup this sanitizer never inspected, and a <template> is
+  //    inert scaffolding for scripts that no longer run anyway.
+  //  * SVG's attribute-animation elements (<animate>/<set>/<animateTransform>). They can set an
+  //    ancestor <a>'s href AFTER load ("attributeName=href to=javascript:..."), so the href
+  //    scheme check below sees only whatever innocent value the book shipped.
+  //  * <meta http-equiv="refresh">, which navigates the chapter frame somewhere of the book's
+  //    choosing the moment it renders.
   _sanitizeDoc(doc) {
-    doc.querySelectorAll('script, iframe, object, embed, form').forEach(el => el.remove());
+    // Unwrap before anything else, so the freed children go through the attribute pass below.
+    doc.querySelectorAll('noscript').forEach(el => el.replaceWith(...el.childNodes));
+    doc.querySelectorAll(
+      'script, iframe, object, embed, form, template, animate, set, animateTransform'
+    ).forEach(el => el.remove());
+    doc.querySelectorAll('meta').forEach(el => {
+      if (/^\s*refresh\s*$/i.test(el.getAttribute('http-equiv') || '')) el.remove();
+    });
     doc.querySelectorAll('*').forEach(el => {
       for (const attr of [...el.attributes]) {
         const name = attr.name.toLowerCase();
         if (name.startsWith('on')) { el.removeAttribute(attr.name); continue; }
-        if ((name === 'href' || name === 'src' || name === 'xlink:href' || name === 'action')
-            && /^\s*javascript:/i.test(attr.value)) {
+        if (ChapterRenderer._URL_ATTRS.has(name)
+            && !ChapterRenderer._isSafeUrl(attr.value, name)) {
           el.removeAttribute(attr.name);
         }
       }
     });
+  }
+
+  // Every attribute the HTML/SVG parsers will fetch or navigate to, checked against
+  // _isSafeUrl below.
+  static _URL_ATTRS = new Set([
+    'href', 'src', 'xlink:href', 'action', 'formaction',
+    'srcdoc', 'data', 'poster', 'background', 'ping',
+  ]);
+
+  // Elements that only ever point at an image can carry a data: payload safely (an SVG
+  // loaded through <img> can't run script); a clickable href can't.
+  static _IMG_ATTRS = new Set(['src', 'xlink:href', 'poster', 'background']);
+
+  // A scheme ALLOWLIST rather than a javascript:/vbscript: blocklist. By the time
+  // _sanitizeDoc sees an attribute the parser has already decoded its entities, so a
+  // blocklist anchored at the start of the value misses "jav&#x09;ascript:" — which is a
+  // real, tab-carrying `javascript:` URL that the navigation code will happily run. Values
+  // with no scheme at all are the normal case here (relative in-book paths, later rewritten
+  // to blob: URLs by _rewriteElements) and always pass.
+  static _isSafeUrl(value, attrName) {
+    const bare = String(value).replace(/[\s\u0000-\u001f]/g, '');
+    const m = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(bare);
+    if (!m) return true;
+    const scheme = m[1].toLowerCase();
+    if (scheme === 'http' || scheme === 'https' || scheme === 'mailto' || scheme === 'blob') return true;
+    return scheme === 'data'
+      && ChapterRenderer._IMG_ATTRS.has(attrName)
+      && /^data:image\//i.test(bare);
   }
 
   async _buildHtml(spineItem, readerCss, fixedLayout = null) {

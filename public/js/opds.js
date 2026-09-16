@@ -779,7 +779,7 @@ export function openSyncModal(folderUrl, folderTitle, existingShelfId = null, se
     })
     .catch(err => {
       const scanEl = backdrop.querySelector('#sync-scanning');
-      scanEl.innerHTML = `<span style="color:var(--color-danger)">${t('common.error_msg', { msg: err.message })}</span>`;
+      scanEl.innerHTML = `<span style="color:var(--color-danger)">${escHtml(t('common.error_msg', { msg: err.message }))}</span>`;
     });
 
   backdrop.querySelector('#sync-modal-cancel')?.addEventListener('click', close);

@@ -387,8 +387,10 @@ async function handleCacheBook(e) {
       })
     );
 
-    // Cache cover image if provided (non-fatal)
-    if (coverPath) {
+    // Cache cover image if provided (non-fatal). coverPath is a bare server-generated filename;
+    // anything with a slash or a ".." in it would resolve the fetch AND the cache key out of
+    // /covers/ and into some other same-origin path, so reject it rather than trust the caller.
+    if (coverPath && /^[A-Za-z0-9._-]+$/.test(coverPath) && !coverPath.includes('..')) {
       try {
         const coverRes = await fetch(`/covers/${coverPath}`);
         if (coverRes.ok) await booksCache.put(`/covers/${coverPath}`, coverRes);

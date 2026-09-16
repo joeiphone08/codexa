@@ -17,7 +17,8 @@ function signState(payload) {
   return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '5m' });
 }
 function verifyState(state) {
-  return jwt.verify(state, process.env.JWT_SECRET);
+  // algorithms pinned, same reasoning as server/middleware/auth.js.
+  return jwt.verify(state, process.env.JWT_SECRET, { algorithms: ['HS256'] });
 }
 
 function deriveUsername(claims) {
@@ -120,7 +121,12 @@ router.get('/:provider/callback', authLimiter, async (req, res) => {
 
       const username = uniqueUsername(db, deriveUsername(claims));
       const name = (claims.name || '').toString().trim().slice(0, 100);
-      const email = normalizeEmail(claims.email).slice(0, 255) || null;
+      // Only keep an email the provider actually vouched for. `users.email` is a login
+      // identifier in its own right (auth.js's /login matches username OR email) and the key
+      // findLinkableAccountByEmail links future identities on, so an IdP that lets a user
+      // self-assert an arbitrary unverified address must not be able to plant someone else's
+      // here. Unverified just means no email on the account — everything else works the same.
+      const email = isEmailVerified(claims) ? (normalizeEmail(claims.email).slice(0, 255) || null) : null;
       const placeholderHash = await bcrypt.hash(crypto.randomUUID(), SALT_ROUNDS);
       const result = db.prepare(
         'INSERT INTO users (username, name, password_hash, oidc_provider, oidc_sub, email) VALUES (?, ?, ?, ?, ?, ?)'

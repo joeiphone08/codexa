@@ -28,6 +28,17 @@ function requireContext(req, res) {
   return ctx;
 }
 
+// Every BookOrbit id below is interpolated straight into the request path this server then
+// fetches (`${ctx.webBase}${path}` in bookorbitSync.js). Taken raw from req.params/query/body
+// that is request-path injection: an id of "1/../../users/me" or "1?x=" rewrites which BookOrbit
+// endpoint gets called, and NaN/undefined from a bare parseInt sails through into the URL too.
+// BookOrbit ids are always positive integers, so demand exactly that and reject anything else.
+function toBoId(v) {
+  if (typeof v === 'number') return Number.isInteger(v) && v > 0 ? v : null;
+  if (typeof v !== 'string' || !/^[1-9][0-9]{0,15}$/.test(v.trim())) return null;
+  return parseInt(v.trim(), 10);
+}
+
 // GET /api/bookorbit/test — settings-page "test connection" button. Ignores the enabled
 // toggle so credentials can be verified before switching extended sync on.
 router.get('/test', async (req, res) => {
@@ -185,7 +196,12 @@ router.get('/books', async (req, res) => {
   const ctx = requireContext(req, res);
   if (!ctx) return;
 
-  const { source, id, q, sort: sortKey } = req.query;
+  const { source, q, sort: sortKey } = req.query;
+  // Validated here rather than at each branch — every source except 'search' puts it in the path.
+  const id = toBoId(req.query.id);
+  if (source !== 'search' && req.query.id != null && id == null) {
+    return res.status(400).json({ error: 'error.id_required' });
+  }
   const page = Math.max(0, parseInt(req.query.page, 10) || 0);
   const size = Math.min(100, Math.max(1, parseInt(req.query.size, 10) || 30));
 
@@ -233,7 +249,12 @@ router.get('/books', async (req, res) => {
       return res.status(400).json({ error: 'error.invalid_source' });
     }
   } catch (err) {
-    return res.status(502).json({ error: 'error.bookorbit_unreachable', detail: err.message });
+    // `detail: err.message` used to go straight back to the caller. Raw Node/undici errors name
+    // internal hosts and ports verbatim ("connect ECONNREFUSED 10.0.0.7:6379"), which turns any
+    // failed BookOrbit request into a network-probing oracle for whoever configured the URL.
+    // Full text stays in the log; the client gets the stable code it already renders.
+    console.warn('[bookorbit] /books upstream error:', err.message);
+    return res.status(502).json({ error: 'error.bookorbit_unreachable' });
   }
 
   const rawItems = Array.isArray(result.items) ? result.items : [];
@@ -272,7 +293,8 @@ router.get('/books', async (req, res) => {
 router.get('/books/:boBookId/collections', async (req, res) => {
   const ctx = requireContext(req, res);
   if (!ctx) return;
-  const boBookId = parseInt(req.params.boBookId, 10);
+  const boBookId = toBoId(req.params.boBookId);
+  if (boBookId == null) return res.status(400).json({ error: 'error.id_required' });
   const r = await bookorbit.api(req.user.id, ctx, 'GET', `/collections?bookIds=${boBookId}`);
   if (!r.ok) return res.status(502).json({ error: 'error.bookorbit_unreachable' });
   const items = (Array.isArray(r.data) ? r.data : []).map(c => ({
@@ -289,7 +311,8 @@ router.get('/books/:boBookId/collections', async (req, res) => {
 router.get('/books/:boBookId/detail', async (req, res) => {
   const ctx = requireContext(req, res);
   if (!ctx) return;
-  const boBookId = parseInt(req.params.boBookId, 10);
+  const boBookId = toBoId(req.params.boBookId);
+  if (boBookId == null) return res.status(400).json({ error: 'error.id_required' });
   const r = await bookorbit.api(req.user.id, ctx, 'GET', `/books/${boBookId}`);
   if (!r.ok || !r.data) return res.status(502).json({ error: 'error.bookorbit_unreachable' });
   const d = r.data;
@@ -320,7 +343,8 @@ router.get('/books/:boBookId/detail', async (req, res) => {
 router.get('/books/:boBookId/related', async (req, res) => {
   const ctx = requireContext(req, res);
   if (!ctx) return;
-  const boBookId = parseInt(req.params.boBookId, 10);
+  const boBookId = toBoId(req.params.boBookId);
+  if (boBookId == null) return res.status(400).json({ error: 'error.id_required' });
   const data = await bookorbit.getRelatedByBoId(req.user.id, ctx, boBookId);
   res.json(data);
 });
@@ -331,8 +355,10 @@ router.get('/books/:boBookId/related', async (req, res) => {
 router.put('/books/:boBookId/collections/:collectionId', async (req, res) => {
   const ctx = requireContext(req, res);
   if (!ctx) return;
-  const boBookId = parseInt(req.params.boBookId, 10);
-  const r = await bookorbit.api(req.user.id, ctx, 'POST', `/collections/${req.params.collectionId}/books`, { bookIds: [boBookId] });
+  const boBookId = toBoId(req.params.boBookId);
+  const collectionId = toBoId(req.params.collectionId);
+  if (boBookId == null || collectionId == null) return res.status(400).json({ error: 'error.id_required' });
+  const r = await bookorbit.api(req.user.id, ctx, 'POST', `/collections/${collectionId}/books`, { bookIds: [boBookId] });
   if (!r.ok) return res.status(502).json({ error: 'error.bookorbit_unreachable' });
   res.status(204).end();
 });
@@ -340,8 +366,10 @@ router.put('/books/:boBookId/collections/:collectionId', async (req, res) => {
 router.delete('/books/:boBookId/collections/:collectionId', async (req, res) => {
   const ctx = requireContext(req, res);
   if (!ctx) return;
-  const boBookId = parseInt(req.params.boBookId, 10);
-  const r = await bookorbit.api(req.user.id, ctx, 'DELETE', `/collections/${req.params.collectionId}/books`, { bookIds: [boBookId] });
+  const boBookId = toBoId(req.params.boBookId);
+  const collectionId = toBoId(req.params.collectionId);
+  if (boBookId == null || collectionId == null) return res.status(400).json({ error: 'error.id_required' });
+  const r = await bookorbit.api(req.user.id, ctx, 'DELETE', `/collections/${collectionId}/books`, { bookIds: [boBookId] });
   if (!r.ok) return res.status(502).json({ error: 'error.bookorbit_unreachable' });
   res.status(204).end();
 });
@@ -365,6 +393,11 @@ async function importBookOrbitFile(userId, ctx, { boBookId, fileId, format, titl
   if (clientFormat && !SUPPORTED_FORMATS.has(clientFormat)) {
     return { ok: false, status: 400, error: 'error.epub_required' };
   }
+  const boId = toBoId(boBookId);
+  const boFileId = toBoId(fileId);
+  if (boId == null || boFileId == null) return { ok: false, status: 400, error: 'error.id_required' };
+  boBookId = boId;
+  fileId = boFileId;
 
   const asset = await bookorbit.fetchAssetStream(userId, ctx, `/books/files/${fileId}/download`, onProgress, abandonSignal);
   if (!asset.ok) {
@@ -482,8 +515,10 @@ async function importBookOrbitFile(userId, ctx, { boBookId, fileId, format, titl
     // nothing was ever logged here) — the one gap left where a bad import could go unnoticed
     // entirely instead of at least showing up in the log for later correlation.
     console.error(`[bookorbit] import failed for fileId=${fileId}:`, err);
+    // Generic code out, full error in the log — these are filesystem/SQLite failures whose
+    // messages carry absolute container paths and schema details.
     try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-    return { ok: false, status: 500, error: err.message };
+    return { ok: false, status: 500, error: 'error.book_upload_failed' };
   }
 }
 
@@ -506,8 +541,8 @@ router.post('/books/:boBookId/import', async (req, res) => {
     if (!result.ok) return res.status(result.status || 500).json({ error: result.error, id: result.id });
     res.status(201).json({ id: result.id, title: result.title, author: result.author });
   } catch (err) {
-    console.error('[bookorbit] import error:', err.message);
-    if (!res.writableEnded) res.status(500).json({ error: err.message });
+    console.error('[bookorbit] import error:', err);
+    if (!res.writableEnded) res.status(500).json({ error: 'error.book_upload_failed' });
   }
 });
 
@@ -563,8 +598,8 @@ router.get('/books/:boBookId/import-sse', async (req, res) => {
       send({ type: 'done', id: result.id, title: result.title, author: result.author });
     }
   } catch (err) {
-    console.error('[bookorbit] import-sse error:', err.message);
-    send({ type: 'error', message: err.message });
+    console.error('[bookorbit] import-sse error:', err);
+    send({ type: 'error', message: 'error.book_upload_failed' });
   } finally {
     if (!clientGone && !res.writableEnded) res.end();
   }
@@ -583,6 +618,11 @@ async function createBookOrbitPeek(userId, ctx, { boBookId, fileId, format, titl
   if (clientFormat && !SUPPORTED_FORMATS.has(clientFormat)) {
     return { ok: false, status: 400, error: 'error.epub_required' };
   }
+  const boId = toBoId(boBookId);
+  const boFileId = toBoId(fileId);
+  if (boId == null || boFileId == null) return { ok: false, status: 400, error: 'error.id_required' };
+  boBookId = boId;
+  fileId = boFileId;
 
   const asset = await bookorbit.fetchAsset(userId, ctx, `/books/files/${fileId}/download`);
   if (!asset.ok) {
@@ -657,8 +697,9 @@ async function createBookOrbitPeek(userId, ctx, { boBookId, fileId, format, titl
 
     return { ok: true, id: result.lastInsertRowid, ephemeral: true };
   } catch (err) {
+    console.error('[bookorbit] peek failed:', err);   // see importBookOrbitFile for why generic
     try { fs.unlinkSync(stagingPath); } catch { /* ignore */ }
-    return { ok: false, status: 500, error: err.message };
+    return { ok: false, status: 500, error: 'error.book_upload_failed' };
   }
 }
 
@@ -675,8 +716,8 @@ router.post('/books/:boBookId/peek', async (req, res) => {
     if (!result.ok) return res.status(result.status || 500).json({ error: result.error });
     res.status(201).json({ id: result.id, ephemeral: result.ephemeral });
   } catch (err) {
-    console.error('[bookorbit] peek error:', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('[bookorbit] peek error:', err);
+    res.status(500).json({ error: 'error.book_upload_failed' });
   }
 });
 
@@ -686,8 +727,10 @@ router.post('/books/:boBookId/peek', async (req, res) => {
 // pruned from the shelf) — a reasonable first cut, same simplification called out in the plan.
 
 function bookOrbitListPath(source, id) {
-  if (source === 'collection') return `/collections/${id}/books`;
-  if (source === 'smartScope') return `/smart-scopes/${id}/books`;
+  const boId = toBoId(id);
+  if (boId == null) return null;
+  if (source === 'collection') return `/collections/${boId}/books`;
+  if (source === 'smartScope') return `/smart-scopes/${boId}/books`;
   return null;
 }
 
@@ -730,7 +773,8 @@ router.get('/sync-count', async (req, res) => {
     }
     res.json({ total: books.length, alreadyHave });
   } catch (err) {
-    res.status(502).json({ error: 'error.bookorbit_unreachable', detail: err.message });
+    console.warn('[bookorbit] /sync-count upstream error:', err.message);   // see /books above
+    res.status(502).json({ error: 'error.bookorbit_unreachable' });
   }
 });
 
@@ -886,8 +930,8 @@ router.get('/sync-sse', async (req, res) => {
 
     done({ type: 'done', added, skipped, errors, shelfId: shelf.id, staleBooks, autoRemoved });
   } catch (err) {
-    console.error('[bookorbit] sync-sse error:', err.message);
-    done({ type: 'error', message: err.message });
+    console.error('[bookorbit] sync-sse error:', err);
+    done({ type: 'error', message: 'error.bookorbit_unreachable' });
   }
 });
 

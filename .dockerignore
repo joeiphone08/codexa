@@ -1,6 +1,12 @@
 node_modules/
 dist/
 .env
+# .env alone does not match .env.local / .env.production — those must not reach the image
+.env.*
+*.pem
+*.key
+*.p12
+*.jks
 data/
 temp/
 *.db
@@ -13,3 +19,6 @@ backfill-series.js
 .gitignore
 .dockerignore
 README*
+.serena/
+.github/
+.forgejo/

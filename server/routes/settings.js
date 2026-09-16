@@ -2,6 +2,7 @@ const express = require('express');
 const { getDb } = require('../db');
 const { authenticateToken } = require('../middleware/auth');
 const bookorbit = require('../services/bookorbitSync');
+const { encryptSecret } = require('../utils/credentialCrypto');
 
 const router = express.Router();
 
@@ -62,13 +63,15 @@ router.put('/', (req, res) => {
     opds_servers:            opds_servers    !== undefined ? JSON.stringify(opds_servers)    : row.opds_servers,
     kosync_url:              kosync_url      !== undefined ? String(kosync_url)              : row.kosync_url,
     kosync_username:         kosync_username !== undefined ? String(kosync_username)         : row.kosync_username,
-    // Empty string means "clear password"; undefined means "keep existing"
-    kosync_password_enc:     kosync_password !== undefined ? String(kosync_password)         : row.kosync_password_enc,
+    // Empty string means "clear password"; undefined means "keep existing".
+    // Stored AES-256-GCM-encrypted (see utils/credentialCrypto); encryptSecret('')
+    // stays '' so "" keeps meaning "no password configured".
+    kosync_password_enc:     kosync_password !== undefined ? encryptSecret(kosync_password)  : row.kosync_password_enc,
     kosync_internal_enabled: kosync_internal_enabled !== undefined ? (kosync_internal_enabled ? 1 : 0) : row.kosync_internal_enabled,
     bookorbit_sync_enabled:  bookorbit_sync_enabled  !== undefined ? (bookorbit_sync_enabled  ? 1 : 0) : row.bookorbit_sync_enabled,
     bookorbit_url:                  bookorbit_url              !== undefined ? String(bookorbit_url)              : row.bookorbit_url,
     bookorbit_account_username:     bookorbit_account_username !== undefined ? String(bookorbit_account_username) : row.bookorbit_account_username,
-    bookorbit_account_password_enc: bookorbit_account_password !== undefined ? String(bookorbit_account_password) : row.bookorbit_account_password_enc,
+    bookorbit_account_password_enc: bookorbit_account_password !== undefined ? encryptSecret(bookorbit_account_password) : row.bookorbit_account_password_enc,
     reader_prefs:            reader_prefs    !== undefined ? JSON.stringify(reader_prefs)    : row.reader_prefs,
   };
 

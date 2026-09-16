@@ -5,6 +5,7 @@ const path = require('path');
 const crypto = require('crypto');
 const cors = require('cors');
 const compression = require('compression');
+const rateLimit = require('express-rate-limit');
 const { initDb, closeDb, DATA_DIR } = require('./db');
 
 const authRoutes     = require('./routes/auth');
@@ -60,6 +61,26 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 64) {
 
 initDb();
 
+// ── Registration policy override (optional) ───────────────────────────────────
+// Self-service registration is otherwise always open on a brand-new instance, and the FIRST
+// account created becomes the admin (server/routes/auth.js's isAdmin() = lowest user id). On a
+// publicly reachable deploy that is a land-grab race: whoever registers first owns the instance,
+// and after that anyone on the internet can still create accounts until the admin happens to
+// toggle it off in the UI. Setting REGISTRATION_ENABLED=false pins the stored policy closed on
+// every boot, so the window can be shut from the deployment config instead of from the UI.
+// Unset = leave whatever the admin toggle stored (previous behavior, unchanged).
+if (process.env.REGISTRATION_ENABLED === 'false' || process.env.REGISTRATION_ENABLED === 'true') {
+  const enabled = process.env.REGISTRATION_ENABLED === 'true' ? '1' : '0';
+  try {
+    require('./db').getDb()
+      .prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('registration_enabled', ?)")
+      .run(enabled);
+    console.log(`[server] REGISTRATION_ENABLED=${process.env.REGISTRATION_ENABLED} enforced from env`);
+  } catch (err) {
+    console.warn('[server] could not apply REGISTRATION_ENABLED:', err.message);
+  }
+}
+
 // ── Middleware ────────────────────────────────────────────────────────────────
 // Trust the first proxy hop (nginx/traefik/etc.) so express-rate-limit can
 // read the real client IP from X-Forwarded-For correctly.
@@ -89,11 +110,47 @@ app.use(compression({
   },
 }));
 
-if (process.env.CORS_ORIGIN) {
-  app.use(cors({ origin: process.env.CORS_ORIGIN, credentials: true }));
+// A wildcard CORS origin is fine on a LAN box and actively dangerous once this is reachable
+// from the open internet: it invites every website a logged-in user visits to read this API's
+// responses cross-origin. `credentials: true` alongside it is also a combination browsers
+// reject outright, so it never did what it looked like it did. Refuse to boot on it in
+// production; in dev, allow it but drop credentials so the semantics are honest.
+const CORS_ORIGINS = (process.env.CORS_ORIGIN || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+if (CORS_ORIGINS.includes('*')) {
+  if (process.env.NODE_ENV === 'production') {
+    console.error('[fatal] CORS_ORIGIN="*" is not allowed in production. List explicit origins ' +
+                  '(comma-separated, e.g. https://books.example.com), or leave it blank for same-origin only.');
+    process.exit(1);
+  }
+  console.warn('[cors] CORS_ORIGIN="*" — any origin allowed (dev only), credentials disabled');
+  app.use(cors({ origin: '*', credentials: false }));
+} else if (CORS_ORIGINS.length) {
+  app.use(cors({ origin: CORS_ORIGINS, credentials: true }));
 }
+// Explicit body caps on both parsers — an unbounded (or default-but-unstated) limit is a free
+// memory-exhaustion DoS for any anonymous caller once this is publicly reachable.
 app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ extended: false }));
+app.use(express.urlencoded({ extended: false, limit: '100kb' }));
+
+// ── Rate limiting (global API floor) ──────────────────────────────────────────
+// server/routes/auth.js already puts a tight per-IP limiter on login/register/OIDC. This is the
+// floor under everything else: without it, every other endpoint — BookOrbit imports, EPUB
+// parsing, search proxying, book downloads — is an unmetered, anonymous-reachable resource on a
+// public deploy. Deliberately generous (well above what any real reading session produces) so it
+// only ever bites automated abuse. Keyed on the real client IP, which works because of the
+// numeric `trust proxy` hop count set above.
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Plain prose, not an i18n key: there is no locale entry for this, and the nearest one
+  // ('error.too_many_attempts') promises a 15-minute wait that does not match this window.
+  // public/js/api.js renders an unknown body.error verbatim, so this shows up correctly.
+  message: { error: 'Too many requests. Please slow down and try again shortly.' },
+});
+app.use('/api', apiLimiter);
 
 // ── Baseline security headers (every response) ─────────────────────────────────
 // The heavier, nonce-bearing Content-Security-Policy is set per-HTML-page below (it needs a
@@ -103,6 +160,13 @@ app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');           // blocks MIME-sniffing a served file into something executable
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');                // legacy clickjacking guard, belt-and-suspenders with frame-ancestors below
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // HSTS, but only on a request that actually arrived over TLS (req.secure reads
+  // X-Forwarded-Proto, which is trustworthy here because of the `trust proxy` hop count above).
+  // Gating on req.secure rather than NODE_ENV means a plain-HTTP LAN/dev instance never pins
+  // itself to https:// in the browser's HSTS store, while a public HTTPS deploy always does.
+  if (req.secure) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
   next();
 });
 
@@ -197,7 +261,12 @@ app.use((req, res, next) => {
   // and no debug-flag injection. Map it to the real file explicitly instead.
   const reqPath  = req.path.endsWith('/') ? req.path + 'index.html' : req.path;
   const filePath = path.resolve(SERVE_DIR, '.' + reqPath);
-  if (!filePath.startsWith(SERVE_DIR) || !fs.existsSync(filePath)) return next();
+  // The containment check has to include the trailing separator: a bare startsWith(SERVE_DIR)
+  // is a string prefix test, not a path test, so with SERVE_DIR = <root>/public a request for
+  // "/../public_notes/x.html" resolves to <root>/public_notes/x.html — which passes a plain
+  // prefix check and would be read off disk and served. Comparing against SERVE_DIR + sep makes
+  // it a real "is inside this directory" test.
+  if (!filePath.startsWith(SERVE_DIR + path.sep) || !fs.existsSync(filePath)) return next();
 
   if (reqPath.endsWith('.html')) {
     const nonce = crypto.randomBytes(16).toString('base64');
@@ -217,10 +286,27 @@ app.use((req, res, next) => {
 });
 
 // ── Static files ──────────────────────────────────────────────────────────────
-app.use(express.static(SERVE_DIR));
-// Expose extracted covers and user-uploaded fonts to the browser
-app.use('/covers',     express.static(path.join(DATA_DIR, 'covers')));
-app.use('/user-fonts', express.static(path.join(DATA_DIR, 'fonts')));
+// dotfiles: 'deny' — express.static's default ('ignore') merely falls through, which lands on
+// the SPA/404 handling below instead of refusing outright; 'deny' is the explicit answer for
+// anything like a stray .env/.git dropped into a served directory. index: false on the DATA_DIR
+// mounts so a request for the bare directory can never resolve to an uploaded file named
+// index.html. These are user-writable directories (covers are extracted from uploaded books,
+// fonts are uploaded outright), so they get the stricter treatment.
+app.use(express.static(SERVE_DIR, { dotfiles: 'deny' }));
+// Expose extracted covers and user-uploaded fonts to the browser.
+// The nonce-CSP middleware above only fires for paths that resolve to a file under SERVE_DIR, so
+// these two mounts would otherwise be served with no CSP at all. They hold the only bytes on disk
+// that originate from an uploaded file, so they get their own locked-down headers: "sandbox" and
+// "default-src 'none'" mean that even if something executable did land here, navigating straight
+// to it yields an opaque origin that can't reach the API or read this origin's localStorage (where
+// the JWT lives), and nosniff stops a mislabelled image being re-interpreted as HTML. This is
+// defence-in-depth behind the magic-byte check in utils/epub.js, not a substitute for it.
+const untrustedAssetHeaders = (res) => {
+  res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+};
+app.use('/covers',     express.static(path.join(DATA_DIR, 'covers'), { dotfiles: 'deny', index: false, setHeaders: untrustedAssetHeaders }));
+app.use('/user-fonts', express.static(path.join(DATA_DIR, 'fonts'),  { dotfiles: 'deny', index: false, setHeaders: untrustedAssetHeaders }));
 
 // ── API routes ────────────────────────────────────────────────────────────────
 app.use('/api/auth',     authRoutes);
@@ -251,7 +337,14 @@ app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 // ── Global error handler ──────────────────────────────────────────────────────
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
-  console.error('[error]', err.message);
+  // Full detail (including the stack) stays in the server log; the client only ever gets the
+  // generic string — an error message echoed back verbatim is how absolute filesystem paths,
+  // internal hostnames and SQL fragments leak to an anonymous caller.
+  console.error('[error]', err.stack || err.message);
+  // Once headers are on the wire (every SSE route here writes them immediately) there is no
+  // status left to set — handing it back to Express lets it destroy the socket instead of
+  // throwing ERR_HTTP_HEADERS_SENT out of the error handler itself.
+  if (res.headersSent) return next(err);
   res.status(500).json({ error: 'Internal server error' });
 });
 

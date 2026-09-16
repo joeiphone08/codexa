@@ -11,14 +11,27 @@ const { authenticateToken } = require('../middleware/auth');
 
 const router = express.Router();
 
+// The two routes below authenticate from ?token= instead of going through authenticateToken
+// (an <img src> / EventSource can't send an Authorization header), so they have to repeat its
+// "does this user still exist?" check themselves. Without it, the token of an account the admin
+// has since deleted (DELETE /api/auth/admin/users/:id) stays usable on them for the full year
+// the JWT is valid for — including the outbound fetches the cover proxy makes.
+function tokenUser(req) {
+  const token = req.query.token || '';
+  if (!token) return null;
+  let payload;
+  // algorithms pinned, same reasoning as server/middleware/auth.js.
+  try { payload = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] }); }
+  catch { return null; }
+  if (!payload?.id) return null;
+  return getDb().prepare('SELECT id FROM users WHERE id = ?').get(payload.id) || null;
+}
+
 // ── Cover proxy — JWT via ?token= so <img src> tags work ─────────────────────
 // This route is registered BEFORE authenticateToken middleware.
 router.get('/cover', (req, res) => {
-  const token = req.query.token || '';
-  if (!token) return res.status(401).end();
-  let user;
-  try { user = jwt.verify(token, process.env.JWT_SECRET); }
-  catch { return res.status(401).end(); }
+  const user = tokenUser(req);
+  if (!user) return res.status(401).end();
 
   const coverUrl = String(req.query.url || '');
   if (!coverUrl.startsWith('http')) return res.status(400).end();
@@ -50,11 +63,8 @@ router.get('/cover', (req, res) => {
 // Auth via ?token=JWT — must stay BEFORE router.use(authenticateToken)
 router.get('/sync-sse', async (req, res) => {
   // Authenticate via token query param
-  const token = req.query.token || '';
-  if (!token) return res.status(401).end();
-  let user;
-  try { user = jwt.verify(token, process.env.JWT_SECRET); }
-  catch { return res.status(401).end(); }
+  const user = tokenUser(req);
+  if (!user) return res.status(401).end();
 
   res.set({
     'Content-Type':  'text/event-stream',

@@ -20,19 +20,22 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Least privilege: nothing here writes to the repo via the job token.
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
-        uses: https://github.com/actions/checkout@v4
+        uses: https://github.com/actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: Set up JDK 17
-        uses: https://github.com/actions/setup-java@v4
+        uses: https://github.com/actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00  # v4.7.1
         with:
           java-version: '17'
           distribution: 'temurin'
 
       - name: Set up Gradle
-        uses: https://github.com/gradle/actions/setup-gradle@v3
+        uses: https://github.com/gradle/actions/setup-gradle@d9c87d481d55275bb5441eef3fe0e46805f9ef70  # v3.5.0
 
       # Self-hosted runner images (e.g. catthehacker/ubuntu) don't ship the Android SDK the
       # way GitHub's hosted ubuntu-latest does — bootstrap it explicitly so the build doesn't
@@ -126,15 +129,21 @@ jobs:
       - name: Prepare Play keystore (for AAB)
         working-directory: Android
         env:
-          KEYSTORE_FILE_B64: ${{ secrets.KEYSTORE_FILE }}
+          KEYSTORE_FILE_B64:  ${{ secrets.KEYSTORE_FILE }}
+          # Routed through env like the DEV_* block above, rather than substituted
+          # inline into the run script: an inline secret is rendered into the step's
+          # command in the log, and breaks the shell quoting if it contains " or $.
+          KEYSTORE_PASSWORD:  ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS:          ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD:       ${{ secrets.KEY_PASSWORD }}
         run: |
           if [ -n "$KEYSTORE_FILE_B64" ]; then
             echo "Using Play upload keystore from KEYSTORE_FILE secret"
             echo "$KEYSTORE_FILE_B64" | base64 -d > /tmp/play-release.jks
             echo "KEYSTORE_FILE=/tmp/play-release.jks"              >> $GITHUB_ENV
-            echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
-            echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}"               >> $GITHUB_ENV
-            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}"         >> $GITHUB_ENV
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"              >> $GITHUB_ENV
+            echo "KEY_ALIAS=$KEY_ALIAS"                             >> $GITHUB_ENV
+            echo "KEY_PASSWORD=$KEY_PASSWORD"                       >> $GITHUB_ENV
           else
             echo "No KEYSTORE_FILE secret found — AAB will fall back to the DEV keystore prepared above"
           fi
@@ -144,21 +153,21 @@ jobs:
         run: ./gradlew bundleRelease
 
       - name: Upload release bundle
-        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://code.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e  # v4
         with:
           name: codexa-reader-release-aab
           path: Android/app/build/outputs/bundle/release/*.aab
           retention-days: 90
 
       - name: Upload debug APK
-        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://code.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e  # v4
         with:
           name: codexa-reader-debug
           path: Android/app/build/outputs/apk/debug/*.apk
           retention-days: 90
 
       - name: Upload release APK
-        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://code.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e  # v4
         with:
           name: codexa-reader-release
           path: Android/app/build/outputs/apk/release/*.apk
@@ -171,7 +180,7 @@ jobs:
           cp Android/app/build/outputs/apk/release/*.apk /tmp/release-assets/
 
       - name: Attach APKs to Codeberg Release
-        uses: https://code.forgejo.org/actions/forgejo-release@v2
+        uses: https://code.forgejo.org/actions/forgejo-release@de47e391d31cd6dc81998dfbe4a96c0c9b3d18ac  # v2
         with:
           direction: upload
           url: https://codeberg.org

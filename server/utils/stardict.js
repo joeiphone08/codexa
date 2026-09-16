@@ -21,6 +21,10 @@ const VOWEL_ACCENT_MAP = {
 };
 const ACCENT_RE = /[áàâäãåéèêëíìîïóòôöõúùûüýÿ]/g;
 
+// Upper bound on a decompressed .dict.dz — see _loadDict(). Comfortably above any real
+// StarDict body (the largest CJK dictionaries are a few hundred MB uncompressed).
+const MAX_DICT_BYTES = 512 * 1024 * 1024;
+
 function normalizeWord(w) {
   return w.toLowerCase().replace(ACCENT_RE, c => VOWEL_ACCENT_MAP[c] || c);
 }
@@ -287,8 +291,13 @@ class StarDict {
     const dictPath   = path.join(this.dir, this.base + '.dict');
     const dictDzPath = dictPath + '.dz';
     if (fs.existsSync(dictDzPath)) {
-      // dictzip is regular gzip — zlib can decompress it in full
-      this._dictBuf = zlib.gunzipSync(fs.readFileSync(dictDzPath));
+      // dictzip is regular gzip — zlib can decompress it in full.
+      // maxOutputLength caps a decompression bomb: dictionaries arrive as user-uploaded ZIPs
+      // (POST /api/dictionary), so a .dict.dz of a few KB could otherwise declare/expand to
+      // tens of GB and OOM-kill the whole server process on the first lookup that touches it.
+      // zlib throws ERR_BUFFER_TOO_LARGE past the cap, which the lookup route already treats
+      // as "broken dictionary, skip it".
+      this._dictBuf = zlib.gunzipSync(fs.readFileSync(dictDzPath), { maxOutputLength: MAX_DICT_BYTES });
     } else if (fs.existsSync(dictPath)) {
       this._dictBuf = fs.readFileSync(dictPath);
     } else {

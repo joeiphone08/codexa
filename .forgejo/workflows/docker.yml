@@ -13,6 +13,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Least privilege: nothing here writes to the repo via the job token.
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout

@@ -32,6 +32,68 @@ function decodeEntities(s) {
     .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)));
 }
 
+// ── Archive-entry safety limits ───────────────────────────────────────────────
+// Every byte below comes out of an untrusted, user-uploaded ZIP. adm-zip inflates an entry
+// straight into a Buffer sized by that entry's OWN declared uncompressed length, so a tiny
+// "zip bomb" (a few KB of highly-compressible data declaring gigabytes) makes a single
+// getData() call allocate gigabytes and OOM-kill the whole container. Check the declared
+// size first and skip the entry instead — a real container.xml/OPF/ComicInfo.xml is a few
+// KB, and a real cover image is a few MB.
+const MAX_XML_BYTES   = 16 * 1024 * 1024;
+const MAX_COVER_BYTES = 32 * 1024 * 1024;
+
+function readEntryCapped(entry, maxBytes, label) {
+  const declared = entry?.header?.size ?? 0;
+  if (declared > maxBytes) {
+    console.warn(`[epub] skipping oversized ${label} entry (${declared} bytes declared)`);
+    return null;
+  }
+  const data = entry.getData();
+  if (data.length > maxBytes) {
+    console.warn(`[epub] skipping oversized ${label} entry (${data.length} bytes)`);
+    return null;
+  }
+  return data;
+}
+
+// The cover's filename extension is taken from an href inside the uploaded file's own OPF
+// manifest (or from a ZIP entry name), and the resulting file is served unauthenticated from
+// /covers by express.static — a path that gets no per-page CSP (server/index.js only applies
+// one to files that exist under SERVE_DIR). An href of "cover.svg" or "cover.html" declared
+// with an image/* media-type would therefore publish attacker-authored, script-executing,
+// SAME-ORIGIN content on this server; anyone who opens that link has their JWT (localStorage
+// 'br_token') read straight out from under them. Only ever write an extension whose served
+// content-type cannot execute script.
+const SAFE_COVER_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.avif', '.bmp']);
+
+// Prefer the extension the BYTES say, not the one the archive claims, so a legitimate cover
+// always lands with the content-type express.static will actually serve it as.
+function sniffImageExt(buf) {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF)                      return '.jpg';
+  if (buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))) return '.png';
+  if (buf.toString('ascii', 0, 3) === 'GIF')                                      return '.gif';
+  if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return '.webp';
+  if (buf.toString('ascii', 0, 2) === 'BM')                                       return '.bmp';
+  if (buf.toString('ascii', 4, 8) === 'ftyp' && buf.toString('ascii', 8, 12).startsWith('avi')) return '.avif';
+  return null;
+}
+
+// Returns the extension to publish this cover under, or null meaning "don't publish it at all".
+// Falling back to the declared extension is only ever allowed for a known raster type: an
+// href of "cover.svg"/"cover.html" (or a bare "cover" with an HTML body) declared with an
+// image/* media-type would otherwise land as script-executing, SAME-ORIGIN content under
+// /covers — which express.static serves unauthenticated and which gets no CSP at all
+// (server/index.js only builds one for files that exist under SERVE_DIR). Anyone who opened
+// that link would have their JWT (localStorage 'br_token') read straight out from under them.
+// A cover we refuse to publish just falls back to the same placeholder any coverless book gets.
+function coverExtFor(buf, name) {
+  const sniffed = sniffImageExt(buf);
+  if (sniffed) return sniffed;
+  const ext = path.extname(String(name || '')).toLowerCase();
+  return SAFE_COVER_EXTS.has(ext) ? ext : null;
+}
+
 // ── File hash ─────────────────────────────────────────────────────────────────
 function computeFileHash(filePath) {
   const buf = fs.readFileSync(filePath);
@@ -90,7 +152,10 @@ function extractEpubMetadata(epubPath, coversDir, fileHash) {
     const containerEntry = zip.getEntry('META-INF/container.xml');
     if (!containerEntry) return result;
 
-    const container = xmlParser.parse(containerEntry.getData().toString('utf8'));
+    const containerData = readEntryCapped(containerEntry, MAX_XML_BYTES, 'container.xml');
+    if (!containerData) return result;
+
+    const container = xmlParser.parse(containerData.toString('utf8'));
     const rootfiles  = container?.container?.rootfiles?.rootfile;
     const rootfile   = Array.isArray(rootfiles) ? rootfiles[0] : rootfiles;
     const opfPath    = rootfile?.['@_full-path'];
@@ -100,7 +165,10 @@ function extractEpubMetadata(epubPath, coversDir, fileHash) {
     const opfEntry = zip.getEntry(opfPath);
     if (!opfEntry) return result;
 
-    const opf = xmlParser.parse(opfEntry.getData().toString('utf8'));
+    const opfData = readEntryCapped(opfEntry, MAX_XML_BYTES, 'OPF');
+    if (!opfData) return result;
+
+    const opf = xmlParser.parse(opfData.toString('utf8'));
     // Some EPUB2 files (real-world example: an older publish, later metadata-edited by
     // Calibre, which preserves the prefixed form) put a namespace prefix directly on the
     // package/metadata/manifest/item elements themselves (<opf:package>, <opf:metadata>, ...)
@@ -276,10 +344,15 @@ function extractEpubMetadata(epubPath, coversDir, fileHash) {
                       || zip.getEntry(zipCoverPath.replace(/\//g, '\\'));
 
       if (coverEntry) {
-        const ext          = path.extname(coverHref).toLowerCase() || '.jpg';
-        const coverFilename = `${fileHash}${ext}`;
-        fs.writeFileSync(path.join(coversDir, coverFilename), coverEntry.getData());
-        result.cover_path = coverFilename;
+        const coverData = readEntryCapped(coverEntry, MAX_COVER_BYTES, 'cover');
+        const coverExt  = coverData && coverExtFor(coverData, coverHref);
+        if (coverExt) {
+          const coverFilename = `${fileHash}${coverExt}`;
+          fs.writeFileSync(path.join(coversDir, coverFilename), coverData);
+          result.cover_path = coverFilename;
+        } else if (coverData) {
+          console.warn(`[epub] cover not published — not a recognised image: ${coverHref}`);
+        }
       }
     }
   } catch (err) {
@@ -306,7 +379,8 @@ function extractCbzMetadata(cbzPath, coversDir, fileHash) {
     const ci = zip.getEntry('ComicInfo.xml');
     if (ci) {
       try {
-        const parsed = xmlParser.parse(ci.getData().toString('utf8'));
+        const ciData = readEntryCapped(ci, MAX_XML_BYTES, 'ComicInfo.xml');
+        const parsed = ciData ? xmlParser.parse(ciData.toString('utf8')) : {};
         const info   = parsed?.ComicInfo || parsed?.comicinfo || {};
         const txt    = (v) => (v !== undefined && v !== null) ? decodeEntities(String(v).trim()) : '';
         if (txt(info.Title))   result.title       = txt(info.Title);
@@ -328,11 +402,14 @@ function extractCbzMetadata(cbzPath, coversDir, fileHash) {
     if (imageEntries.length > 0) {
       result.pages = String(imageEntries.length);
       const first = imageEntries[0];
-      const ext = path.extname(first.entryName).toLowerCase() || '.jpg';
-      const coverFilename = `${fileHash}${ext}`;
       try {
-        fs.writeFileSync(path.join(coversDir, coverFilename), first.getData());
-        result.cover_path = coverFilename;
+        const coverData = readEntryCapped(first, MAX_COVER_BYTES, 'cover');
+        const coverExt  = coverData && coverExtFor(coverData, first.entryName);
+        if (coverExt) {
+          const coverFilename = `${fileHash}${coverExt}`;
+          fs.writeFileSync(path.join(coversDir, coverFilename), coverData);
+          result.cover_path = coverFilename;
+        }
       } catch { /* cover extraction failed */ }
     }
   } catch (err) {

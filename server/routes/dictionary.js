@@ -152,6 +152,17 @@ router.post('/', authenticateToken, uploadDict.array('dict', 10), (req, res) => 
         results.push({ file: file.originalname, error: 'no .ifo found in ZIP' });
         continue;
       }
+      // Never extract an entry whose name escapes the destination folder — a "zip slip"
+      // archive (entry named "../../server/index.js", or an absolute path) would otherwise be
+      // written straight over the app's own files by any logged-in user.
+      const unsafe = entries.find(e => {
+        const n = e.entryName.replace(/\\/g, '/');
+        return n.startsWith('/') || /^[a-zA-Z]:/.test(n) || n.split('/').includes('..');
+      });
+      if (unsafe) {
+        results.push({ file: file.originalname, error: 'unsafe path in ZIP' });
+        continue;
+      }
       const baseName = path.basename(file.originalname, '.zip').replace(/[^\w.\-]/g, '_');
       const destDir  = path.join(DICT_DIR, baseName);
       fs.mkdirSync(destDir, { recursive: true });

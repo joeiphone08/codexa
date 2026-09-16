@@ -7,6 +7,15 @@ const RAR4_SIG = Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00]);
 const RAR5_SIG = Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00]);
 const IMAGE_EXT = /\.(jpe?g|png|webp|gif|avif)$/i;
 
+// RAR decompression-bomb guards. node-unrar-js decompresses every entry fully into memory and
+// this function then holds all of them at once while building the ZIP, so an untrusted CBR that
+// unpacks to tens of GB (trivially built — a few MB of RAR expanding ~1000:1) would exhaust the
+// container's memory and kill the whole server process, not just this upload. Bound the per-file
+// size, the running total, and the entry count.
+const MAX_IMAGE_BYTES = 64  * 1024 * 1024;
+const MAX_TOTAL_BYTES = 512 * 1024 * 1024;
+const MAX_IMAGE_COUNT = 10000;
+
 function isCbrBuffer(buf) {
   if (!buf || buf.length < 7) return false;
   return buf.slice(0, 7).equals(RAR4_SIG) || buf.slice(0, 8).equals(RAR5_SIG);
@@ -26,10 +35,20 @@ async function convertCbrToCbz(rarBuffer) {
 
   const zip = new AdmZip();
   let count = 0;
+  let totalBytes = 0;
   for (const file of files) {
     if (file.fileHeader.flags.directory) continue;
     if (!IMAGE_EXT.test(file.fileHeader.name)) continue;
-    const entry = zip.addFile(file.fileHeader.name, Buffer.from(file.extraction));
+    // Declared size first (cheap, before touching the decompressed bytes), then the real
+    // length — a lying header can't sneak past the running total either way.
+    const declared = Number(file.fileHeader.unpSize) || 0;
+    if (declared > MAX_IMAGE_BYTES) throw new Error('[cbr] archive entry too large');
+    const data = Buffer.from(file.extraction);
+    if (data.length > MAX_IMAGE_BYTES) throw new Error('[cbr] archive entry too large');
+    totalBytes += data.length;
+    if (totalBytes > MAX_TOTAL_BYTES) throw new Error('[cbr] archive expands too large');
+    if (count >= MAX_IMAGE_COUNT)    throw new Error('[cbr] archive has too many entries');
+    const entry = zip.addFile(file.fileHeader.name, data);
     // adm-zip stamps each entry with the current wall-clock time by default, which makes the
     // resulting CBZ's bytes (and therefore its hash) different on every single conversion of
     // the exact same source RAR — breaking both our own file_hash duplicate-detection on
