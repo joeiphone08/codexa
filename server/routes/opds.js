@@ -8,6 +8,7 @@ const crypto     = require('crypto');
 const { XMLParser } = require('fast-xml-parser');
 const { getDb }             = require('../db');
 const { authenticateToken } = require('../middleware/auth');
+const { registry: providerRegistry } = require('../providers');
 
 const router = express.Router();
 
@@ -34,6 +35,20 @@ router.get('/cover', (req, res) => {
   if (!user) return res.status(401).end();
 
   const coverUrl = String(req.query.url || '');
+
+  const provider = providerRegistry.fromCatalogId(req.query.server);
+  if (provider) {
+    provider.fetchCover(coverUrl, { userId: user.id })
+      .then(asset => {
+        if (!asset.ok || !asset.buffer?.length) return res.status(404).end();
+        res.set('Content-Type', asset.contentType || 'image/jpeg');
+        res.set('Cache-Control', 'private, max-age=900');
+        res.send(asset.buffer);
+      })
+      .catch(() => res.status(404).end());
+    return;
+  }
+
   if (!coverUrl.startsWith('http')) return res.status(400).end();
 
   const servers = getServers(user.id);
@@ -477,6 +492,22 @@ function getServerById(servers, id) {
   return servers[idx];
 }
 
+function responseFromProviderAsset(asset) {
+  return {
+    ok: !!asset?.ok,
+    status: asset?.status || 500,
+    error: asset?.error || '',
+    headers: { get: name => {
+      const lower = String(name).toLowerCase();
+      if (lower === 'content-type') return asset?.contentType || '';
+      if (lower === 'x-codexa-book-format') return asset?.format || '';
+      return '';
+    } },
+    arrayBuffer: async () => asset?.buffer || Buffer.alloc(0),
+    release: typeof asset?.release === 'function' ? asset.release : null,
+  };
+}
+
 // Annotate book entries with the local book id already tracked for them (if any), so the
 // client can show Read/Peek immediately instead of only discovering ownership reactively via
 // a 409 from the download route. Matches the same acq_href key used everywhere else in this
@@ -714,7 +745,7 @@ router.get('/servers', (req, res) => {
     url:  s.url,
     username: s.username,
     has_password: !!s.password,
-  })));
+  })).concat(providerRegistry.list()));
 });
 
 // ── GET /api/opds/health — reachability of every configured server ───────────
@@ -731,7 +762,13 @@ router.get('/health', async (req, res) => {
       return [i, { reachable: false, checkedAt }];
     }
   }));
-  res.json(Object.fromEntries(results));
+  const health = Object.fromEntries(results);
+  for (const provider of providerRegistry.list()) {
+    // Loading the server list does not scrape providers. Report the honest state as unknown;
+    // successful/failed searches remain the bounded, user-initiated reachability check.
+    health[provider.id] = { reachable: null, checkedAt: null };
+  }
+  res.json(health);
 });
 
 // ── POST /api/opds/servers ────────────────────────────────────────────────────
@@ -788,6 +825,9 @@ router.delete('/servers/:id', (req, res) => {
 // ── GET /api/opds/browse/:id — fetch & parse a catalog URL ───────────────────
 // ?url=... overrides the server root URL (for sub-catalog navigation)
 router.get('/browse/:id', async (req, res) => {
+  const provider = providerRegistry.fromCatalogId(req.params.id);
+  if (provider) return res.json(provider.browse());
+
   const servers = getServers(req.user.id);
   const server  = getServerById(servers, req.params.id);
   if (!server) return res.status(404).json({ error: 'error.server_not_found' });
@@ -816,12 +856,25 @@ router.get('/browse/:id', async (req, res) => {
 // ── GET /api/opds/search/:id — search catalog ────────────────────────────────
 // ?q=search+term
 router.get('/search/:id', async (req, res) => {
+  const provider = providerRegistry.fromCatalogId(req.params.id);
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.status(400).json({ error: 'error.search_query_required' });
+  if (provider) {
+    try {
+      const feed = await provider.search(q, { userId: req.user.id });
+      feed.entries = annotateLocalOwnership(feed.entries, req.user.id);
+      return res.json(feed);
+    } catch (err) {
+      console.warn(`[provider:${provider.id}] search error:`, err.message);
+      const status = err.message === 'error.external_busy' ? 429
+        : err.message === 'error.external_timeout' ? 504 : 502;
+      return res.status(status).json({ error: err.message });
+    }
+  }
+
   const servers = getServers(req.user.id);
   const server  = getServerById(servers, req.params.id);
   if (!server) return res.status(404).json({ error: 'error.server_not_found' });
-
-  const q = String(req.query.q || '').trim();
-  if (!q) return res.status(400).json({ error: 'error.search_query_required' });
 
   try {
     // Step 1: fetch root feed to find the search link
@@ -1041,18 +1094,31 @@ router.post('/sync', async (req, res) => {
 // ── POST /api/opds/download/:id — download epub to user library ───────────────
 // body: { href, title, author, cover }
 router.post('/download/:id', async (req, res) => {
+  const provider = providerRegistry.fromCatalogId(req.params.id);
   const servers = getServers(req.user.id);
-  const server  = getServerById(servers, req.params.id);
-  if (!server) return res.status(404).json({ error: 'error.server_not_found' });
+  const server  = provider ? null : getServerById(servers, req.params.id);
+  if (!server && !provider) return res.status(404).json({ error: 'error.server_not_found' });
 
   const { href, title, author, cover } = req.body || {};
   if (!href) return res.status(400).json({ error: 'error.href_required' });
 
-  const resolvedHref = resolveUrl(href, server.url);
+  // Provider hrefs are opaque cache references. They are resolved server-side and are bound to
+  // this user; no caller-supplied network URL reaches fetch().
+  const resolvedHref = provider ? String(href) : resolveUrl(href, server.url);
 
+  let providerRelease = null;
   try {
-    const r = await opdsFetch(server, resolvedHref, { signal: AbortSignal.timeout(60000) });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const r = provider
+      ? responseFromProviderAsset(await provider.fetchAcquisition(resolvedHref, { userId: req.user.id }))
+      : await opdsFetch(server, resolvedHref, { signal: AbortSignal.timeout(60000) });
+    providerRelease = r.release;
+    if (!r.ok) {
+      if (provider) return res.status(r.status || 502).json({
+        error: r.error || `HTTP ${r.status}`,
+        ...(r.status === 410 ? { action: 'search_again' } : {}),
+      });
+      throw new Error(`HTTP ${r.status}`);
+    }
 
     const ct    = r.headers.get('content-type') || '';
     const ctLow = ct.toLowerCase();
@@ -1077,17 +1143,19 @@ router.post('/download/:id', async (req, res) => {
     const userDir  = path.join(BOOKS_DIR, String(req.user.id));
     fs.mkdirSync(userDir, { recursive: true });
 
-    let buf = Buffer.from(await r.arrayBuffer());
+    const responseBody = await r.arrayBuffer();
+    let buf = Buffer.isBuffer(responseBody) ? responseBody : Buffer.from(responseBody);
     if (buf.length < 100) throw new Error('error.file_empty');
 
-    let format = 'epub';
+    const providerFormat = provider ? r.headers.get('x-codexa-book-format') : '';
+    let format = providerFormat || 'epub';
     if (isPdfBuffer(buf)) {
       format = 'pdf';
     } else if (isCbrBuffer(buf)) {
       console.log('[opds] converting CBR → CBZ...');
       buf = await convertCbrToCbz(buf);
       format = 'cbz';
-    } else if (ctLow.includes('cbz') || ctLow.includes('comicbook+zip')) {
+    } else if (providerFormat === 'cbz' || ctLow.includes('cbz') || ctLow.includes('comicbook+zip')) {
       format = 'cbz';
     }
 
@@ -1120,8 +1188,21 @@ router.post('/download/:id', async (req, res) => {
         : format === 'cbz'
         ? extractCbzMetadata(destPath, COVERS_DIR, fileHash)
         : extractEpubMetadata(destPath, COVERS_DIR, fileHash);
-      if (!meta.cover_path && cover) {
+      if (!meta.cover_path && cover && !provider) {
         meta.cover_path = await fetchCoverToFile(resolveUrl(cover, server.url), server, COVERS_DIR, fileHash);
+      } else if (!meta.cover_path && cover && provider) {
+        try {
+          const coverAsset = await provider.fetchCover(cover, { userId: req.user.id });
+          if (coverAsset.ok && coverAsset.buffer?.length > 100) {
+            const lower = String(coverAsset.contentType || '').toLowerCase();
+            const ext = lower.includes('png') ? '.png' : lower.includes('webp') ? '.webp' : '.jpg';
+            const coverFilename = `${fileHash}${ext}`;
+            fs.writeFileSync(path.join(COVERS_DIR, coverFilename), coverAsset.buffer);
+            meta.cover_path = coverFilename;
+          }
+        } catch (err) {
+          console.warn(`[provider:${provider.id}] cover fallback failed:`, err.message);
+        }
       }
       const bookTitle  = meta.title  || title  || 'Unknown';
       const bookAuthor = meta.author || author || '';
@@ -1151,6 +1232,8 @@ router.post('/download/:id', async (req, res) => {
   } catch (err) {
     console.error('[opds] download error:', err.message);
     res.status(500).json({ error: err.message });
+  } finally {
+    providerRelease?.();
   }
 });
 
@@ -1162,12 +1245,20 @@ router.post('/download/:id', async (req, res) => {
 // CBR-conversion prologue rather than sharing it, to keep that well-tested real-download path
 // untouched. Unlike a real download, this never runs metadata extraction/cover generation — the
 // client already has title/author from the browse/search entry it rendered.
-async function createOpdsPeek(userId, server, { href, title, author }) {
-  const resolvedHref = resolveUrl(href, server.url);
-  const r = await opdsFetch(server, resolvedHref, { signal: AbortSignal.timeout(60000) });
-  if (!r.ok) return { ok: false, status: 502, error: `HTTP ${r.status}` };
+async function createOpdsPeek(userId, server, { href, title, author }, provider = null) {
+  const resolvedHref = provider ? String(href) : resolveUrl(href, server.url);
+  const r = provider
+    ? responseFromProviderAsset(await provider.fetchAcquisition(resolvedHref, { userId }))
+    : await opdsFetch(server, resolvedHref, { signal: AbortSignal.timeout(60000) });
+  try {
+    if (!r.ok) return {
+      ok: false,
+      status: provider ? (r.status || 502) : 502,
+      error: provider ? (r.error || `HTTP ${r.status}`) : `HTTP ${r.status}`,
+      ...(provider && r.status === 410 ? { action: 'search_again' } : {}),
+    };
 
-  const ct = (r.headers.get('content-type') || '').toLowerCase();
+    const ct = (r.headers.get('content-type') || '').toLowerCase();
   if (!ct.includes('epub') && !ct.includes('octet') &&
       !ct.includes('zip')  && !ct.includes('rar')   &&
       !ct.includes('cbr')  && !ct.includes('cbz')   &&
@@ -1186,16 +1277,18 @@ async function createOpdsPeek(userId, server, { href, title, author }) {
   const TMP_DIR = path.join(DATA_DIR, 'tmp');
   fs.mkdirSync(TMP_DIR, { recursive: true });
 
-  let buf = Buffer.from(await r.arrayBuffer());
+  const responseBody = await r.arrayBuffer();
+  let buf = Buffer.isBuffer(responseBody) ? responseBody : Buffer.from(responseBody);
   if (buf.length < 100) return { ok: false, status: 502, error: 'error.file_empty' };
 
-  let format = 'epub';
+  const providerFormat = provider ? r.headers.get('x-codexa-book-format') : '';
+  let format = providerFormat || 'epub';
   if (isPdfBuffer(buf)) {
     format = 'pdf';
   } else if (isCbrBuffer(buf)) {
     buf = await convertCbrToCbz(buf);
     format = 'cbz';
-  } else if (ct.includes('cbz') || ct.includes('comicbook+zip')) {
+  } else if (providerFormat === 'cbz' || ct.includes('cbz') || ct.includes('comicbook+zip')) {
     format = 'cbz';
   }
 
@@ -1239,19 +1332,26 @@ async function createOpdsPeek(userId, server, { href, title, author }) {
     try { fs.unlinkSync(stagingPath); } catch { /* ignore */ }
     return { ok: false, status: 500, error: err.message };
   }
+  } finally {
+    r.release?.();
+  }
 }
 
 router.post('/peek/:id', async (req, res) => {
+  const provider = providerRegistry.fromCatalogId(req.params.id);
   const servers = getServers(req.user.id);
-  const server  = getServerById(servers, req.params.id);
-  if (!server) return res.status(404).json({ error: 'error.server_not_found' });
+  const server  = provider ? null : getServerById(servers, req.params.id);
+  if (!server && !provider) return res.status(404).json({ error: 'error.server_not_found' });
 
   const { href, title, author } = req.body || {};
   if (!href) return res.status(400).json({ error: 'error.href_required' });
 
   try {
-    const result = await createOpdsPeek(req.user.id, server, { href, title, author });
-    if (!result.ok) return res.status(result.status || 500).json({ error: result.error });
+    const result = await createOpdsPeek(req.user.id, server, { href, title, author }, provider);
+    if (!result.ok) return res.status(result.status || 500).json({
+      error: result.error,
+      ...(result.action ? { action: result.action } : {}),
+    });
     res.status(201).json({ id: result.id, ephemeral: result.ephemeral });
   } catch (err) {
     console.error('[opds] peek error:', err.message);

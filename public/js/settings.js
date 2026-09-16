@@ -817,18 +817,19 @@ function renderOpdsServers(servers) {
   opdsEmpty.hidden = servers.length > 0;
 
   servers.forEach(s => {
+    const managedByEnvironment = s.type === 'provider';
     const row = document.createElement('div');
     row.className = 'opds-server-row';
     row.style.cssText = 'display:flex;align-items:center;gap:.75rem;padding:.6rem 0;border-bottom:1px solid var(--color-border)';
     row.innerHTML = `
       <div style="flex:1;min-width:0;font-weight:600;font-size:.875rem">${escHtml(s.name)}</div>
       <button class="btn btn-secondary btn-sm opds-open-btn" style="white-space:nowrap">${t('settings.opds_open')}</button>
-      <button class="btn btn-secondary btn-sm opds-edit-btn">${t('settings.opds_edit')}</button>
-      <button class="btn btn-danger btn-sm opds-del-btn">${t('settings.opds_remove')}</button>
+      ${managedByEnvironment ? '' : `<button class="btn btn-secondary btn-sm opds-edit-btn">${t('settings.opds_edit')}</button>`}
+      ${managedByEnvironment ? '' : `<button class="btn btn-danger btn-sm opds-del-btn">${t('settings.opds_remove')}</button>`}
     `;
     row.querySelector('.opds-open-btn').addEventListener('click', () => showPanel('opds'));
-    row.querySelector('.opds-edit-btn').addEventListener('click', () => enterEditMode(s));
-    row.querySelector('.opds-del-btn').addEventListener('click', () => deleteOpdsServer(s.id, s.name));
+    row.querySelector('.opds-edit-btn')?.addEventListener('click', () => enterEditMode(s));
+    row.querySelector('.opds-del-btn')?.addEventListener('click', () => deleteOpdsServer(s.id, s.name));
     opdsServerList.appendChild(row);
   });
 }

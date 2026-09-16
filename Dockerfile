@@ -29,7 +29,7 @@ COPY vendor-stubs ./vendor-stubs
 RUN npm ci --no-audit --no-fund
 
 COPY . .
-RUN npm run build
+RUN npm test && npm run build
 # A plain `npm prune --omit=dev` was the next bottleneck once the npm ci fix above landed:
 # confirmed on real builds going from ~55s (fresh npm ci, both archs) to 100-234s for prune
 # alone — a huge jump for removing the same ~29 devDep packages that used to take ~10s before

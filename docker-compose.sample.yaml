@@ -20,5 +20,29 @@ services:
       # Optional — override default port inside the container
       # PORT: "3000"
 
+      # Optional external discovery provider (disabled until BASE_URL is set). Search and
+      # reading stay in Codexa; direct files are accepted only from the explicit host allowlist.
+      # EXTERNAL_BOOKS_ANNA_BASE_URL: "https://your-authorized-mirror.example"
+      # EXTERNAL_BOOKS_ANNA_NAME: "External Books"
+      # EXTERNAL_BOOKS_ANNA_DIRECT_HOSTS: "downloads.example"
+      # EXTERNAL_BOOKS_ANNA_COVER_HOSTS: "images.example"
+      # EXTERNAL_BOOKS_SEARCH_LIMIT: "12"
+      # EXTERNAL_BOOKS_MAX_BOOK_MB: "150"
+      # EXTERNAL_BOOKS_CACHE_TTL_MINUTES: "15"
+      # EXTERNAL_BOOKS_CACHE_MAX_PER_USER: "100"
+      # EXTERNAL_BOOKS_CACHE_MAX_USERS: "1000"
+      # EXTERNAL_BOOKS_CACHE_MAX_MB: "32"
+      # EXTERNAL_BOOKS_SEARCH_TIMEOUT_MS: "15000"
+      # EXTERNAL_BOOKS_DOWNLOAD_TIMEOUT_MS: "60000"
+      # EXTERNAL_BOOKS_DETAIL_CONCURRENCY: "3"
+      # EXTERNAL_BOOKS_SEARCH_GLOBAL_LIMIT: "8"
+      # EXTERNAL_BOOKS_SEARCH_PER_USER_LIMIT: "2"
+      # EXTERNAL_BOOKS_COVER_GLOBAL_LIMIT: "16"
+      # EXTERNAL_BOOKS_COVER_PER_USER_LIMIT: "8"
+      # EXTERNAL_BOOKS_ACQUISITION_GLOBAL_LIMIT: "4"
+      # EXTERNAL_BOOKS_ACQUISITION_PER_USER_LIMIT: "2"
+      # EXTERNAL_BOOKS_ACQUISITION_MAX_INFLIGHT_MB: "300"
+      # EXTERNAL_BOOKS_ALLOW_PRIVATE_NETWORK: "false"
+
 volumes:
   codexa_data:

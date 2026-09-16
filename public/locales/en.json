@@ -792,5 +792,22 @@
   "error.opds_server_not_found": "OPDS server not found.",
   "error.zip_required": "A ZIP file is required.",
   "error.invalid_lang_code": "Language code must be 2-3 letters (e.g. \"en\", \"zh\").",
-  "error.dict_name_conflict": "A dictionary with that name already exists for that language pair."
+  "error.dict_name_conflict": "A dictionary with that name already exists for that language pair.",
+  "error.external_invalid_url": "The external provider returned an invalid URL.",
+  "error.external_host_not_allowed": "The external provider redirected to a host that is not allowed.",
+  "error.external_port_not_allowed": "The external provider used a network port that is not allowed.",
+  "error.external_private_network_blocked": "The external provider tried to reach a private or reserved network address.",
+  "error.external_response_too_large": "The external provider response exceeded the configured size limit.",
+  "error.external_timeout": "The external provider took too long to respond.",
+  "error.external_connect_timeout": "The connection to the external provider timed out.",
+  "error.external_connection_failed": "Codexa could not connect to the external provider.",
+  "error.external_busy": "The external provider is busy. Try again shortly.",
+  "error.external_too_many_redirects": "The external provider returned too many redirects.",
+  "error.external_invalid_redirect": "The external provider returned an invalid redirect.",
+  "error.external_unexpected_content_type": "The external provider returned an unexpected content type.",
+  "error.external_reference_expired": "This search result expired. Search again to refresh it.",
+  "error.external_reference_invalid": "This external search result is invalid.",
+  "error.external_cover_unavailable": "The external cover is unavailable.",
+  "error.external_acquisition_unavailable": "This result does not have an authorized direct download.",
+  "error.external_invalid_book_file": "The downloaded file did not match the expected book format."
 }

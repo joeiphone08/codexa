@@ -442,6 +442,10 @@ function renderBookCard(entry) {
 function renderPeekButton(coverWrapEl, entry) {
   coverWrapEl.querySelector('.opds-card-peek-btn')?.remove();
 
+  // External providers can return useful metadata even when they cannot resolve an authorized
+  // direct file. Do not imply that Peek is available in that state; the info action remains.
+  if (currentServer?.type === 'provider' && !entry.localBookId && !entry.acqHref) return;
+
   if (entry.localBookId) {
     const link = document.createElement('a');
     link.className = 'opds-card-peek-btn';

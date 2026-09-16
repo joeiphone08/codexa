@@ -1132,7 +1132,9 @@ export async function openInfoModal(book, startTab = '') {
       const bookorbitOption = bookorbitEnabled ? `<option value="bookorbit">${t('library.kosync_source_bookorbit')}</option>` : '';
       try {
         const servers = await apiFetch('/opds/servers');
-        const opdsOptions = (servers || []).map((s, i) => `<option value="${i}">${escHtml(s.name || s.url)}</option>`).join('');
+        // This KOReader hash-import helper expects a conventional numeric OPDS server. Built-in
+        // discovery providers use opaque result references and do not belong in this selector.
+        const opdsOptions = (servers || []).filter(s => s.type !== 'provider').map(s => `<option value="${s.id}">${escHtml(s.name || s.url)}</option>`).join('');
         ikServer.innerHTML = (bookorbitOption + opdsOptions) || `<option value="">${t('library.kosync_no_servers')}</option>`;
       } catch {
         ikServer.innerHTML = bookorbitOption || `<option value="">${t('library.kosync_no_servers')}</option>`;

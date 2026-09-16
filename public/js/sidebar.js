@@ -61,13 +61,19 @@ export async function initSidebar({ onShelfSelect = null, activeShelfId = 'all' 
   // BookOrbit + Online library nav item visibility — fetched here (not left to library.js's own
   // /settings fetch) so both are correct even when the app opens directly into a non-library
   // panel. One request for both: GET /settings already returns opds_servers in full (it's the
-  // same data GET /opds/servers exposes, just not password-stripped — fine here since it's never
-  // rendered, only counted), so there's no need for a second round trip on every page load just
-  // to check whether any OPDS server is configured.
+  // same stored data GET /opds/servers exposes, just not password-stripped — fine here since it
+  // is never rendered, only counted). Environment-managed discovery providers are not stored in
+  // settings, so an empty stored list gets one lightweight /opds/servers fallback below.
   apiFetch('/settings').then(s => {
     setBookorbitNavVisible(!!s.bookorbit_sync_enabled);
     if (s.bookorbit_sync_enabled) checkBookorbitHealth();
-    setOpdsNavVisible((s.opds_servers || []).length > 0);
+    const hasConfiguredOpds = (s.opds_servers || []).length > 0;
+    setOpdsNavVisible(hasConfiguredOpds);
+    // Environment-managed discovery providers are intentionally absent from user settings.
+    // Only pay for this second request when there is no ordinary OPDS server to reveal the nav.
+    if (!hasConfiguredOpds) {
+      apiFetch('/opds/servers').then(servers => setOpdsNavVisible(servers.length > 0)).catch(() => {});
+    }
   }).catch(() => {});
 
   // Username

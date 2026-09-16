@@ -326,6 +326,52 @@ Browse via a folder tree on the left and a card grid on the right. Every book ca
 library at all; the file is fetched to a temporary location and cleaned up automatically as soon
 as you close the reader.
 
+### Optional external discovery provider
+
+Codexa can expose an Anna's Archive search adapter inside the same Online Library interface. It
+is disabled by default and runs in the existing Codexa process; no Calibre, Librarr, or extra
+container is required. Set `EXTERNAL_BOOKS_ANNA_BASE_URL` to the current mirror you are
+authorized to use. Codexa deliberately does not ship or discover fallback mirrors.
+
+Search remains metadata-only unless `EXTERNAL_BOOKS_ANNA_DIRECT_HOSTS` contains the hostnames
+that may serve direct book files. Add and Peek appear only after the adapter finds a direct EPUB,
+PDF, or CBZ link on that allowlist. CBR stays supported for ordinary Codexa imports but is
+metadata-only in this trial. Downloads use short-lived, user-bound opaque references,
+block private-network destinations and unexpected redirects, enforce size/time limits, and
+reject HTML or files with invalid magic bytes. See `.env.example` for all provider settings.
+
+The adapter only reads ordinary HTML responses. It does not attempt CAPTCHA, Cloudflare, WAF,
+rate-limit, or access-control bypasses.
+
+| Environment variable | Default | Purpose |
+|---|---:|---|
+| `EXTERNAL_BOOKS_ANNA_BASE_URL` | disabled | Authorized provider base URL; setting it enables the provider |
+| `EXTERNAL_BOOKS_ANNA_NAME` | `External Books` | Name shown in Online Library |
+| `EXTERNAL_BOOKS_ANNA_DIRECT_HOSTS` | empty | Comma-separated hosts allowed to serve direct book files |
+| `EXTERNAL_BOOKS_ANNA_COVER_HOSTS` | empty | Additional comma-separated cover hosts; the base host is always included |
+| `EXTERNAL_BOOKS_SEARCH_LIMIT` | `12` | Results retained per search, clamped to 1–30 |
+| `EXTERNAL_BOOKS_MAX_BOOK_MB` | `150` | Maximum proxied book size in MiB, clamped to 1–250 |
+| `EXTERNAL_BOOKS_CACHE_TTL_MINUTES` | `15` | Lifetime of user-bound search references, clamped to 1–1440 minutes |
+| `EXTERNAL_BOOKS_CACHE_MAX_PER_USER` | `100` | Per-user LRU limit for cached search results, clamped to 10–500 |
+| `EXTERNAL_BOOKS_CACHE_MAX_USERS` | `1000` | Global LRU limit for user cache maps, clamped to 10–5000 |
+| `EXTERNAL_BOOKS_CACHE_MAX_MB` | `32` | Approximate process-wide memory budget for cached result metadata, clamped to 1–256 MiB |
+| `EXTERNAL_BOOKS_SEARCH_TIMEOUT_MS` | `15000` | Overall search deadline, clamped to 1000–30000 ms |
+| `EXTERNAL_BOOKS_DOWNLOAD_TIMEOUT_MS` | `60000` | Acquisition deadline, clamped to 5000–120000 ms |
+| `EXTERNAL_BOOKS_DETAIL_CONCURRENCY` | `3` | Concurrent detail-page lookups per search, clamped to 1–5 |
+| `EXTERNAL_BOOKS_SEARCH_GLOBAL_LIMIT` | `8` | Concurrent provider searches across users, clamped to 1–32 |
+| `EXTERNAL_BOOKS_SEARCH_PER_USER_LIMIT` | `2` | Concurrent provider searches per user, clamped to 1–8 |
+| `EXTERNAL_BOOKS_COVER_GLOBAL_LIMIT` | `16` | Concurrent provider cover fetches across users, clamped to 1–64 |
+| `EXTERNAL_BOOKS_COVER_PER_USER_LIMIT` | `8` | Concurrent provider cover fetches per user, clamped to 1–16 |
+| `EXTERNAL_BOOKS_ACQUISITION_GLOBAL_LIMIT` | `4` | Concurrent provider acquisitions across users, clamped to 1–8 |
+| `EXTERNAL_BOOKS_ACQUISITION_PER_USER_LIMIT` | `2` | Concurrent provider acquisitions per user, clamped to 1–4 |
+| `EXTERNAL_BOOKS_ACQUISITION_MAX_INFLIGHT_MB` | `300` | Process-wide byte reservation for acquisitions through import/peek completion, clamped to 1–1024 MiB and never below one maximum-size book |
+| `EXTERNAL_BOOKS_ALLOW_PRIVATE_NETWORK` | `false` | Permit private/reserved destinations for a trusted LAN provider |
+
+Search references are user-bound and short-lived. If one expires, search again before using Add
+or Peek. Keep private-network access disabled unless both Codexa and the configured provider run
+on a network you control. A commented deployment example is included in
+`docker-compose.sample.yaml`.
+
 ---
 
 ## BookOrbit
